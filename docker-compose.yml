@@ -6,28 +6,28 @@
 # The browser talks to the API directly, so WEB_API_URL must be reachable
 # from the browser (default assumes both run on the same host).
 services:
-  # transcript:
-  #   build: .
-  #   image: transcript-service:latest
-  #   ports:
-  #     - "${TRANSCRIPT_PORT:-8000}:8000"
-  #   env_file:
-  #     - .env
-  #   environment:
-  #     TRANSCRIPT_HOST: 0.0.0.0
-  #     TRANSCRIPT_PORT: 8000
-  #   volumes:
-  #     # Model weights (~3 GB) survive rebuilds/restarts here.
-  #     - hf-cache:/cache/huggingface
-  #   deploy:
-  #     resources:
-  #       reservations:
-  #         devices:
-  #           - driver: nvidia
-  #             count: all
-  #             capabilities: [gpu]
-  #   shm_size: 2gb
-  #   restart: unless-stopped
+  transcript:
+    build: .
+    image: transcript-service:latest
+    ports:
+      - "${TRANSCRIPT_PORT:-8000}:8000"
+    env_file:
+      - .env
+    environment:
+      TRANSCRIPT_HOST: 0.0.0.0
+      TRANSCRIPT_PORT: 8000
+    volumes:
+      # Model weights (~3 GB) survive rebuilds/restarts here.
+      - hf-cache:/cache/huggingface
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    shm_size: 2gb
+    restart: unless-stopped
 
   web:
     build:
@@ -38,8 +38,8 @@ services:
     ports:
       - "${WEB_PORT:-3000}:3000"
     # depends_on:
-    #   transcript:
-    #     condition: service_healthy
+      transcript:
+        condition: service_healthy
     restart: unless-stopped
 
   # HTTPS local (microfone fora de localhost exige contexto seguro).
@@ -57,8 +57,8 @@ services:
     volumes:
       - caddy-data:/data
     depends_on:
-      # transcript:
-      #   condition: service_healthy
+      transcript:
+        condition: service_healthy
       web:
         condition: service_started
     restart: unless-stopped
