@@ -29,6 +29,8 @@ export default function Home() {
   const [apiBase, setApiBase] = useState(DEFAULT_API_BASE);
   const [partials, setPartials] = useState(true);
   const [tab, setTab] = useState<"live" | "file">("live");
+  const [testingApi, setTestingApi] = useState(false);
+  const [apiStatus, setApiStatus] = useState<{ ok: boolean; detail: string } | null>(null);
   const stream = useTranscriptionStream();
   const micRef = useRef<{ stop: () => void } | null>(null);
   const [recording, setRecording] = useState(false);
@@ -40,6 +42,29 @@ export default function Home() {
     streamId: randomStreamId(prefix),
     partials,
   });
+
+  async function testConnection() {
+    setTestingApi(true);
+    setApiStatus(null);
+    try {
+      const response = await fetch(`${apiBase.replace(/\/$/, "")}/health`, {
+        signal: AbortSignal.timeout(8000),
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const health = await response.json();
+      setApiStatus({
+        ok: true,
+        detail: `ok · ASR ${health.asr_provider} · diarização ${health.diarization_provider} · streams ${health.active_streams}/${health.max_streams} · ${health.device}`,
+      });
+    } catch (error) {
+      setApiStatus({
+        ok: false,
+        detail: error instanceof Error ? error.message : "falha desconhecida",
+      });
+    } finally {
+      setTestingApi(false);
+    }
+  }
 
   async function toggleRecording() {
     if (recording) {
@@ -98,12 +123,30 @@ export default function Home() {
 
       <section className="grid grid-cols-1 gap-3 rounded-xl bg-zinc-900/50 p-4 sm:grid-cols-2">
         <Field label="URL da API">
-          <input
-            className={inputClass}
-            value={apiBase}
-            onChange={(e) => setApiBase(e.target.value)}
-            placeholder="http://localhost:8000"
-          />
+          <div className="flex gap-2">
+            <input
+              className={`${inputClass} min-w-0 flex-1`}
+              value={apiBase}
+              onChange={(e) => {
+                setApiBase(e.target.value);
+                setApiStatus(null);
+              }}
+              placeholder="http://localhost:8000"
+            />
+            <button
+              onClick={testConnection}
+              disabled={testingApi}
+              className="shrink-0 rounded-lg bg-zinc-700 px-3 py-2 text-sm font-medium hover:bg-zinc-600 disabled:opacity-50"
+            >
+              {testingApi ? "Testando…" : "Testar"}
+            </button>
+          </div>
+          {apiStatus && (
+            <p className={`text-xs ${apiStatus.ok ? "text-emerald-400" : "text-red-400"}`}>
+              {apiStatus.ok ? "● " : "○ "}
+              {apiStatus.detail}
+            </p>
+          )}
         </Field>
         <label className="flex items-end gap-2 pb-2 text-sm text-zinc-300">
           <input

@@ -27,11 +27,11 @@ O navegador só libera o microfone em contexto seguro. O serviço `proxy`
 
 ```bash
 docker compose up --build
-# abra https://<host>/ e aceite o aviso do navegador UMA vez
+# abra https://<host>:8443/ e aceite o aviso do navegador UMA vez
 # ("Não seguro" → Avançado → prosseguir)
 ```
 
-No campo **URL da API** do front, digite `https://<host>/api` (o WebSocket
+No campo **URL da API** do front, digite `https://<host>:8443/api` (o WebSocket
 vira `wss://` sozinho). O front avisa se você misturar página HTTPS com API
 `http://` — o navegador bloquearia (mixed content).
 
