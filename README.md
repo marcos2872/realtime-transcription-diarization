@@ -20,6 +20,21 @@ docker compose up --build
 # API: http://localhost:8000 · front de teste: http://localhost:3000
 ```
 
+### HTTPS local (para usar o microfone fora de `localhost`)
+
+O navegador só libera o microfone em contexto seguro. O serviço `proxy`
+(Caddy) expõe tudo em HTTPS com certificado local:
+
+```bash
+docker compose up --build
+# abra https://<host>/ e aceite o aviso do navegador UMA vez
+# ("Não seguro" → Avançado → prosseguir)
+```
+
+No campo **URL da API** do front, digite `https://<host>/api` (o WebSocket
+vira `wss://` sozinho). O front avisa se você misturar página HTTPS com API
+`http://` — o navegador bloquearia (mixed content).
+
 - Imagem multi-stage sobre `nvidia/cuda` com `uv sync --frozen` (build reproduzível via `uv.lock`).
 - Pesos dos modelos (~3 GB) persistem no volume `hf-cache` (`HF_HOME=/cache/huggingface`).
 - `HEALTHCHECK` em `GET /health`; `restart: unless-stopped`.

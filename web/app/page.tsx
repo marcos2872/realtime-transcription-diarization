@@ -81,6 +81,10 @@ export default function Home() {
   }
 
   const busy = stream.connection === "connecting" || stream.connection === "closing";
+  const mixedContent =
+    typeof window !== "undefined" &&
+    window.location.protocol === "https:" &&
+    apiBase.startsWith("http://");
 
   return (
     <main className="mx-auto flex min-h-screen max-w-2xl flex-col gap-6 p-6">
@@ -111,6 +115,13 @@ export default function Home() {
           Mostrar texto parcial
         </label>
       </section>
+
+      {mixedContent && (
+        <p className="rounded-lg bg-amber-950 px-3 py-2 text-sm text-amber-200">
+          Página em HTTPS com API em http:// será bloqueada pelo navegador (mixed content).
+          Use <span className="font-mono">https://&lt;host&gt;/api</span> no campo URL da API.
+        </p>
+      )}
 
       <nav className="flex gap-2">
         {(["live", "file"] as const).map((t) => (

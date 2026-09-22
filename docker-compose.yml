@@ -42,5 +42,25 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  # HTTPS local (microfone fora de localhost exige contexto seguro).
+  # O front continua acessível em http://<host>:3000, mas use
+  # https://<host>/ e, no campo "URL da API", https://<host>/api
+  # (wss:// é derivado automaticamente). Aceite o aviso do navegador
+  # uma vez — o certificado é assinado pela CA interna do Caddy.
+  proxy:
+    image: caddy:2-alpine
+    ports:
+      - "${HTTPS_PORT:-443}:443"
+    volumes:
+      - ./proxy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+    depends_on:
+      transcript:
+        condition: service_healthy
+      web:
+        condition: service_started
+    restart: unless-stopped
+
 volumes:
   hf-cache:
+  caddy-data:
