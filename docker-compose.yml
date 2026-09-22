@@ -48,13 +48,13 @@ services:
   # (wss:// é derivado automaticamente). Aceite o aviso do navegador
   # uma vez — o certificado é assinado pela CA interna do Caddy.
   proxy:
-    image: caddy:2-alpine
+    build: ./proxy
+    image: transcript-proxy:latest
     ports:
       # Host usa porta alta (rootless docker não binda <1024); dentro do
       # container o Caddy continua no 443.
       - "${HTTPS_PORT:-8443}:443"
     volumes:
-      - ./proxy/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data
     depends_on:
       # transcript:
