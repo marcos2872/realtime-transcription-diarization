@@ -12,7 +12,7 @@ ARG NEXT_PUBLIC_API_BASE_URL=http://localhost:8000
 ENV NEXT_PUBLIC_API_BASE_URL=${NEXT_PUBLIC_API_BASE_URL}
 COPY --from=deps /web/node_modules ./node_modules
 COPY . .
-RUN npm run build
+RUN mkdir -p ./public && npm run build
 
 FROM node:22-alpine AS runner
 WORKDIR /web
