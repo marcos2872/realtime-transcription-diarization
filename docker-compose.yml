@@ -37,7 +37,7 @@ services:
     image: transcript-web:latest
     ports:
       - "${WEB_PORT:-3000}:3000"
-    # depends_on:
+    depends_on:
       transcript:
         condition: service_healthy
     restart: unless-stopped
