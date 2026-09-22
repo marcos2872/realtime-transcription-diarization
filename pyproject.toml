@@ -15,9 +15,11 @@ dependencies = [
 
 [project.optional-dependencies]
 # Heavy, GPU-bound dependencies. Install with:
-#   uv sync --extra asr --extra diarization   (or --all-extras)
+#   uv sync --extra asr --extra diarization
 # The Docker image installs everything; local dev/tests run without them.
-asr = ["nemo_toolkit[asr]>=2.2"]
+# (transformers>=5.13 carries the Nemotron3_5Asr streaming implementation
+# used by the ASR adapter; librosa is required by its feature extractor.)
+asr = ["transformers>=5.13", "torch>=2.2", "accelerate>=0.30", "librosa>=0.10"]
 diarization = ["pyannote.audio>=4.0"]
 
 [project.scripts]
@@ -42,7 +44,7 @@ packages = ["src/transcript"]
 asyncio_mode = "auto"
 testpaths = ["tests"]
 markers = [
-    "gpu: requires CUDA plus the asr/diarization extras (nemo, pyannote)",
+    "gpu: requires CUDA plus the asr/diarization extras (transformers, pyannote)",
 ]
 
 [tool.ruff]

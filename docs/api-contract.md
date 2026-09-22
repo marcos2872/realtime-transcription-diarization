@@ -211,7 +211,7 @@ significa que novos streams serão recusados com `stream_limit`.
 
 - **Streams paralelos**: `TRANSCRIPT_MAX_STREAMS` (padrão **4**, teto 64).
 - **Latência de emissão**: o texto sai por chunks de `TRANSCRIPT_CHUNK_MS`
-  (80/160/320/560/1120 ms — maior = mais preciso, mais latente); os timestamps
+  (80/320/560/1120 ms — maior = mais preciso, mais latente); os timestamps
   de palavra descontam `TRANSCRIPT_LOOKAHEAD_S` do instante de chegada.
 - **Atribuição de falante**: a diarização roda sobre janelas de
   `TRANSCRIPT_DIARIZATION_WINDOW_S` a cada `TRANSCRIPT_DIARIZATION_HOP_S`,
@@ -266,7 +266,7 @@ asyncio.run(transcribe([b"\x00\x00" * SAMPLE_RATE] * 12))
 | `TRANSCRIPT_EMIT_PARTIALS` | `true` | parciais por padrão (`?partials=` sobrescreve) |
 | `TRANSCRIPT_ASR_PROVIDER` | `nemotron` | `nemotron` \| `fake` (sem GPU) |
 | `TRANSCRIPT_ASR_MODEL` | `nvidia/nemotron-3.5-asr-streaming-0.6b` | checkpoint HF |
-| `TRANSCRIPT_CHUNK_MS` | `320` | 80/160/320/560/1120 |
+| `TRANSCRIPT_CHUNK_MS` | `320` | 80/320/560/1120 |
 | `TRANSCRIPT_LOOKAHEAD_S` | `1.4` | âncora dos timestamps de palavra |
 | `TRANSCRIPT_DIARIZATION_PROVIDER` | `pyannote` | `pyannote` \| `fake` |
 | `TRANSCRIPT_DIARIZATION_PIPELINE` | `pyannote/speaker-diarization-community-1` | pipeline HF (gated) |

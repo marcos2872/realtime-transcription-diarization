@@ -46,7 +46,7 @@ vira `wss://` sozinho). O front avisa se você misturar página HTTPS com API
 
 ```
 src/transcript/
-├── domain/        # regras de negócio puras — sem NeMo, pyannote, FastAPI
+├── domain/        # regras de negócio puras — sem transformers, pyannote, FastAPI
 │   ├── value_objects/   Timestamp, Speaker, SpeakerTurn, Word
 │   ├── entities/        AudioStream (aggregate), Utterance
 │   ├── services/        assign_speaker

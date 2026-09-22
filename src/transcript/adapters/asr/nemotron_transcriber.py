@@ -1,17 +1,20 @@
-"""Nemotron streaming transcriber, backed by NVIDIA NeMo cache-aware inference.
+"""Nemotron streaming transcriber, backed by HuggingFace Transformers.
 
-The NeMo cache-aware model (``conformer_stream_step`` + ``CacheAwareStreamingAudioBuffer``)
-expects mel-spectrogram *features*, so this adapter owns the whole GPU loop:
+Implements the documented streaming pattern for
+``nvidia/nemotron-3.5-asr-streaming-0.6b`` (``AutoModelForRNNT`` + ``generate``
+with an ``input_features`` generator + ``TextIteratorStreamer``), adapted from
+whole-file to live audio:
 
-1. PCM16 chunks accumulate in :class:`_LiveAudioBuffer`.
-2. Only complete, stride-aligned feature frames are extracted (with left
-   context so every frame matches whole-file preprocessing — no STFT seams).
-3. Each emitted frame is appended to NeMo's buffer and immediately decoded;
-   only the text grown since the previous call is returned, split into words
-   timestamped inside the real-time horizon ``[span_start, now - lookahead]``.
+- each stream runs one ``model.generate`` call in a pump thread; the feature
+  generator blocks on newly pushed audio instead of a file;
+- a consumer thread drains the streamer into the session's live text;
+- ``push_audio`` returns only the words grown since the previous call,
+  timestamped inside ``[span_start, now - lookahead]`` (approximate);
+- ``finish_stream`` signals end-of-stream (padding the tail), joins the pump
+  and returns the final words.
 
-Everything NeMo touches runs on a worker thread (``asyncio.to_thread``) behind
-a single lock, so the event loop never blocks while 4 streams share the GPU.
+Heavy work (``generate`` + processor calls) runs on worker threads so the
+event loop never blocks while streams share the GPU.
 """
 
 from __future__ import annotations
@@ -20,7 +23,10 @@ import asyncio
 import logging
 import re
 import threading
-from dataclasses import dataclass, field
+import time
+from collections.abc import Iterator
+from contextlib import suppress
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
@@ -30,27 +36,33 @@ from transcript.domain.value_objects import Timestamp, Word
 
 logger = logging.getLogger(__name__)
 
-# NeMo accepts the right attention context (lookahead) in 80 ms encoder frames;
-# the Nemotron model card documents {0, 1, 3, 6, 13} for {80, 160, 320, 560, 1120} ms.
-RIGHT_CONTEXT_FRAMES_BY_CHUNK_MS: dict[int, int] = {80: 0, 160: 1, 320: 3, 560: 6, 1120: 13}
+# Chunk size (ms) -> Transformers right attention context. The Transformers
+# port supports [3, 0, 6, 13]; there is no 160 ms operating point here
+# (validated against processor.supported_num_lookahead_tokens).
+LOOKAHEAD_TOKENS_BY_CHUNK_MS: dict[int, int] = {80: 0, 320: 3, 560: 6, 1120: 13}
 
 # Suffix emitted in language auto-detect mode, appended after terminal punctuation.
+# (The streamer already decodes with skip_special_tokens=True; kept as belt and braces.)
 _LANGUAGE_TAG_SUFFIX = re.compile(r"\s*<[a-zA-Z]{2,3}(?:-[a-zA-Z]{2,4})?>\s*$")
 
 # Words attributed to a single growth step are capped to this span, so a long
 # silence followed by one word does not smear that word over a minute of timeline.
 MAX_WORD_SPAN_S = 8.0
 
+# Generous but finite: finish() must not hang forever if generate stalls.
+PUMP_JOIN_TIMEOUT_S = 60.0
+CLOSE_JOIN_TIMEOUT_S = 5.0
 
-# --- pure helpers (unit-tested, no GPU/model needed) ------------------------
+
+# --- pure helpers (unit-tested, no model needed) ----------------------------
 
 
 def right_context_frames(chunk_ms: int) -> int:
-    """Map a streaming chunk size to NeMo's right attention context (80 ms frames)."""
+    """Map a streaming chunk size to the model's right attention context."""
     try:
-        return RIGHT_CONTEXT_FRAMES_BY_CHUNK_MS[chunk_ms]
+        return LOOKAHEAD_TOKENS_BY_CHUNK_MS[chunk_ms]
     except KeyError:
-        expected = ", ".join(str(ms) for ms in sorted(RIGHT_CONTEXT_FRAMES_BY_CHUNK_MS))
+        expected = ", ".join(str(ms) for ms in sorted(LOOKAHEAD_TOKENS_BY_CHUNK_MS))
         raise ValueError(f"unsupported chunk_ms {chunk_ms}; expected one of {expected}") from None
 
 
@@ -81,196 +93,209 @@ def allocate_word_spans(
     return [(span_start + i * width, span_start + (i + 1) * width) for i in range(word_count)]
 
 
-# --- live audio feed --------------------------------------------------------
+def pcm_bytes_to_float(pcm: bytes) -> np.ndarray:
+    """PCM16 mono bytes -> float32 mono in [-1, 1]."""
+    return (np.frombuffer(pcm, dtype="<i2").astype(np.float32) / 32768.0).copy()
 
 
-def _as_int(value: object) -> int | None:
-    try:
-        number = int(value)  # type: ignore[arg-type]
-    except (TypeError, ValueError):
+@dataclass(frozen=True, slots=True)
+class ChunkPlan:
+    """One streaming window in absolute sample coordinates."""
+
+    start_sample: int
+    end_sample: int
+    mel_frames: int
+    is_first: bool
+    final: bool  # tail padded with zeros (only possible at end-of-stream)
+
+
+class ChunkPlanner:
+    """Plans streaming windows mirroring the documented Transformers chunking.
+
+    One larger first window, then fixed windows derived from mel progress with
+    STFT left context (``start = mel_idx * hop - n_fft // 2``). All indices
+    are absolute; the session translates them against its trimmed buffer.
+    Window starts are strictly increasing, so everything before the last
+    emitted start can be dropped.
+    """
+
+    def __init__(
+        self,
+        *,
+        first_samples: int,
+        per_chunk_samples: int,
+        first_mel: int,
+        per_mel: int,
+        hop_length: int,
+        n_fft: int,
+    ) -> None:
+        if first_samples <= 0 or per_chunk_samples <= 0 or per_mel <= 0:
+            raise ValueError("chunk sizes must be positive")
+        self._first_samples = first_samples
+        self._per_chunk_samples = per_chunk_samples
+        self._first_mel = first_mel
+        self._per_mel = per_mel
+        self._hop_length = hop_length
+        self._n_fft = n_fft
+        self._first_done = False
+        self._mel_idx = first_mel
+        self.last_start = 0
+
+    def plan(self, available_samples: int, *, eos: bool) -> ChunkPlan | None:
+        """Next window fully covered by samples, or the padded tail at eos."""
+        if not self._first_done:
+            if available_samples >= self._first_samples:
+                return self._emit_first(final=False)
+            if eos and available_samples > 0:
+                return self._emit_first(final=True)
+            return None
+        start = self._mel_idx * self._hop_length - self._n_fft // 2
+        end = start + self._per_chunk_samples
+        if available_samples >= end:
+            return self._emit_next(start, end, final=False)
+        if eos and available_samples > start:
+            return self._emit_next(start, end, final=True)
         return None
-    return number if number > 0 else None
 
-
-def _cfg_number(cfg: object, *names: str) -> float | None:
-    """First present config value among ``names`` (OmegaConf-safe, no KeyError)."""
-    for name in names:
-        try:
-            if name in cfg:  # type: ignore[operator]
-                return float(cfg[name])  # type: ignore[index]
-        except Exception:
-            continue
-    return None
-
-
-def _resolve_stft_params(preprocessor: Any, cfg: Any, default_sample_rate: int) -> tuple[int, int]:
-    """Return ``(hop_length, n_fft)`` in samples for the model's frontend.
-
-    NeMo preprocessor configs differ per model (``hop_length`` vs
-    ``window_stride``, ``n_fft`` vs ``window_size``), so probe live module
-    attributes first, then config keys, and fail listing the available keys
-    when nothing matches.
-    """
-    featurizer = getattr(preprocessor, "featurizer", None)
-    hop = _as_int(getattr(featurizer, "hop_length", None)) or _as_int(
-        getattr(preprocessor, "hop_length", None)
-    )
-    win = (
-        _as_int(getattr(featurizer, "n_fft", None))
-        or _as_int(getattr(preprocessor, "n_fft", None))
-        or _as_int(getattr(preprocessor, "win_length", None))
-    )
-
-    sample_rate = _cfg_number(cfg, "sample_rate") or default_sample_rate
-    if hop is None:
-        hop = _as_int(_cfg_number(cfg, "hop_length"))
-        if hop is None:
-            stride_s = _cfg_number(cfg, "window_stride")
-            hop = _as_int(stride_s * sample_rate) if stride_s else None
-    if win is None:
-        win = _as_int(_cfg_number(cfg, "n_fft"))
-        if win is None:
-            size_s = _cfg_number(cfg, "window_size")
-            win = _as_int(size_s * sample_rate) if size_s else None
-
-    if hop is None or win is None:
-        try:
-            available = sorted(cfg.keys())
-        except Exception:
-            available = ["?"]
-        raise TranscriptionFailed(
-            "cannot determine STFT hop_length/n_fft from the NeMo preprocessor; "
-            f"preprocessor config keys: {available}"
-        )
-    return hop, win
-
-
-class _LiveAudioBuffer:
-    """Seam-free, chunk-gated feed into NeMo's ``CacheAwareStreamingAudioBuffer``.
-
-    NeMo's buffer preprocesses each appended piece independently, so raw PCM is
-    accumulated here and extracted as mel features over a sliding window with
-    ``n_fft`` samples of left context: every feature frame the model ever sees
-    matches whole-file preprocessing exactly. Whole-file frame counts
-    (``len / hop`` at the end of stream) are never assumed up front — the
-    preprocessor output itself tells us how many frames a piece really holds.
-    """
-
-    def __init__(self, model: Any, default_sample_rate: int = 16_000) -> None:
-        from nemo.collections.asr.parts.utils.streaming_utils import (
-            CacheAwareStreamingAudioBuffer,
+    def _emit_first(self, *, final: bool) -> ChunkPlan:
+        self._first_done = True
+        self.last_start = 0
+        return ChunkPlan(
+            start_sample=0,
+            end_sample=self._first_samples,
+            mel_frames=self._first_mel,
+            is_first=True,
+            final=final,
         )
 
-        self._nemo = CacheAwareStreamingAudioBuffer(model=model)
-        self._preprocessor = self._nemo.preprocessor  # dither/pad-free copy owned by the buffer
-        self._hop, self._n_fft = _resolve_stft_params(
-            self._preprocessor, model.cfg.preprocessor, default_sample_rate
+    def _emit_next(self, start: int, end: int, *, final: bool) -> ChunkPlan:
+        self._mel_idx += self._per_mel
+        self.last_start = start
+        return ChunkPlan(
+            start_sample=start,
+            end_sample=end,
+            mel_frames=self._per_mel,
+            is_first=False,
+            final=final,
         )
-        self._left_context_frames = -(-self._n_fft // self._hop)  # ceil(n_fft / hop)
 
-        shift = self._nemo.streaming_cfg.shift_size
-        self._shift = int(shift[1] if isinstance(shift, list) else shift)
 
-        self._raw = bytearray()
-        self._raw_start_sample = 0  # absolute sample index of _raw[0]
-        self._written_frame = 0  # absolute frames already appended to NeMo's buffer
-        self._device = self._nemo.get_model_device()
+# --- live session -----------------------------------------------------------
+
+
+class _StreamSession:
+    """Per-stream state: sample buffer, planner, pump/consumer threads, live text."""
+
+    def __init__(self, stream_id: str, planner: ChunkPlanner, sample_rate: int) -> None:
+        self.stream_id = stream_id
+        self.planner = planner
+        self.sample_rate = sample_rate
+        self.condition = threading.Condition()
+        self._chunks: list[np.ndarray] = []
+        self._dropped = 0  # absolute index of _chunks[0][0]
+        self.samples_pushed = 0
+        self.live_text = ""
+        self.emitted_text = ""
+        self.span_start_s = 0.0
+        self.eos = False
+        self.abandoned = False
+        self.error: BaseException | None = None
+        self.streamer: Any = None
+        self.pump_done = False
+        self.pump_thread: threading.Thread | None = None
+        self.consumer_thread: threading.Thread | None = None
+
+    # -- buffer (call with condition held unless noted) --------------------
 
     @property
-    def nemo_buffer(self) -> Any:
-        return self._nemo
+    def available(self) -> int:
+        return self.samples_pushed - self._dropped
 
-    def feed(self, pcm: bytes, *, final: bool = False) -> None:
-        """Append PCM16 and extract every newly completable frame window.
+    def append_pcm(self, pcm: bytes) -> None:
+        with self.condition:
+            self._chunks.append(pcm_bytes_to_float(pcm))
+            self.samples_pushed += len(pcm) // 2
+            self.condition.notify_all()
 
-        Non-final pushes extract only frames whose full STFT context has
-        arrived (no look-ahead reads past what was pushed). The final call
-        flushes the tail, whose right edge the preprocessor zero-pads — exactly
-        like whole-file inference.
-        """
-        if pcm:
-            self._raw += pcm
-        raw_samples = len(self._raw) // 2
-        if raw_samples == 0:
-            return
+    def materialize(self, start: int, end: int) -> np.ndarray:
+        """Absolute [start, end) as float32, zero-padded past available audio."""
+        with self.condition:
+            local_start = start - self._dropped
+            have = self.available - local_start
+            parts: list[np.ndarray] = []
+            remaining_start = max(0, local_start)
+            remaining = max(0, min(end - start, have - max(0, -local_start)))
+            offset = remaining_start
+            for chunk in self._chunks:
+                if offset >= len(chunk):
+                    offset -= len(chunk)
+                    continue
+                take = min(len(chunk) - offset, remaining)
+                if take <= 0:
+                    break
+                parts.append(chunk[offset : offset + take])
+                remaining -= take
+                offset = 0
+                if remaining <= 0:
+                    break
+            view = np.concatenate(parts) if parts else np.zeros(0, dtype=np.float32)
+            if len(view) < end - start:
+                view = np.pad(view, (0, end - start - len(view)))
+            return view
 
-        if final:
-            target = self._written_frame + self._remaining_frames(raw_samples, final=True)
-        else:
-            available = self._raw_start_sample + self._remaining_frames(raw_samples, final=False)
-            complete = (available - self._written_frame) // self._shift
-            if complete <= 0:
+    def drop_before(self, index: int) -> None:
+        with self.condition:
+            cut = index - self._dropped
+            if cut <= 0:
                 return
-            target = self._written_frame + complete * self._shift
+            kept: list[np.ndarray] = []
+            for chunk in self._chunks:
+                if cut >= len(chunk):
+                    cut -= len(chunk)
+                    continue
+                if cut > 0:
+                    chunk = chunk[cut:]
+                    cut = 0
+                kept.append(chunk)
+            dropped_now = index - self._dropped
+            self._chunks = kept
+            self._dropped = index
+            assert dropped_now >= 0
 
-        if target > self._written_frame:
-            self._extract_and_append(target)
+    def set_eos(self) -> None:
+        with self.condition:
+            self.eos = True
+            self.condition.notify_all()
 
-    def _remaining_frames(self, raw_samples: int, *, final: bool) -> int:
-        absolute_samples = self._raw_start_sample + raw_samples
-        if final:
-            highest = absolute_samples // self._hop  # whole-file frame count (inclusive)
-        else:
-            highest = (absolute_samples - self._n_fft // 2) // self._hop
-        return max(0, highest + 1 - self._written_frame)
+    def set_abandoned(self) -> None:
+        with self.condition:
+            self.abandoned = True
+            self.eos = True
+            self.condition.notify_all()
 
-    def _extract_and_append(self, target: int) -> None:
-        import torch
+    def set_error(self, exc: BaseException) -> None:
+        with self.condition:
+            if self.error is None:
+                self.error = exc
+            self.eos = True
+            self.condition.notify_all()
 
-        window_start_sample = max(
-            self._raw_start_sample, self._written_frame * self._hop - self._n_fft
-        )
-        byte_offset = (window_start_sample - self._raw_start_sample) * 2
-        samples = np.frombuffer(bytes(self._raw[byte_offset:]), dtype="<i2").astype(np.float32)
-        samples /= 32768.0
-        if samples.size == 0:
-            raise RuntimeError("live buffer window unexpectedly empty")
+    def append_live_text(self, text: str) -> None:
+        with self.condition:
+            self.live_text += text
 
-        signal = torch.from_numpy(samples).unsqueeze(0).to(self._device)
-        length = torch.tensor([samples.shape[0]])
-        with torch.inference_mode():
-            features, _ = self._preprocessor(input_signal=signal, length=length)
-
-        local_end = target - window_start_sample // self._hop
-        if features.shape[-1] < local_end:
-            raise RuntimeError(
-                f"preprocessor returned {features.shape[-1]} frames, expected >= {local_end}"
-            )
-        piece = features[:, :, :local_end]
-        stream_id = -1 if self._written_frame == 0 and self._raw_start_sample == 0 else 0
-        self._nemo.append_processed_signal(piece, stream_id=stream_id)
-        self._written_frame = target
-
-        # Trim raw PCM no longer needed (keep left context for the next window).
-        new_start_sample = max(0, target * self._hop - self._n_fft)
-        cut = new_start_sample - self._raw_start_sample
-        if cut > 0:
-            del self._raw[: cut * 2]
-            self._raw_start_sample = new_start_sample
-
-
-@dataclass
-class _StreamSession:
-    """Per-stream decoding state: GPU caches plus the last emitted text."""
-
-    buffer: _LiveAudioBuffer
-    cache_last_channel: Any = None
-    cache_last_time: Any = None
-    cache_last_channel_len: Any = None
-    previous_hypotheses: Any = None
-    previous_pred_out: Any = None
-    step: int = 0
-    text: str = ""
-    span_start_s: float = 0.0
-    samples_pushed: int = 0
-    extra: dict = field(default_factory=dict)
+    def check_error(self) -> None:
+        with self.condition:
+            exc = self.error
+        if exc is not None:
+            raise TranscriptionFailed(f"streaming failed: {exc}") from exc
 
 
 # --- the adapter ------------------------------------------------------------
 
 
 class NemotronTranscriber:
-    """Transcriber port backed by NVIDIA NeMo cache-aware streaming inference."""
+    """Transcriber port backed by Transformers streaming inference (Nemotron 3.5 ASR)."""
 
     def __init__(
         self,
@@ -289,8 +314,9 @@ class NemotronTranscriber:
         self._lookahead_s = lookahead_s
         self._sample_rate = sample_rate
 
-        self._torch: Any = None
         self._model: Any = None
+        self._processor: Any = None
+        self._lookahead_tokens = right_context_frames(chunk_ms)  # validated early
         self._resolved_device = device
         self._lock = threading.Lock()
         self._sessions: dict[str, _StreamSession] = {}
@@ -316,47 +342,49 @@ class NemotronTranscriber:
             return
         try:
             import torch
-            from nemo.collections.asr.models import ASRModel
-            from nemo.collections.asr.parts.submodules.rnnt_decoding import RNNTDecodingConfig
+            from transformers import AutoModelForRNNT, AutoProcessor
         except ImportError as exc:
             raise RuntimeError(
-                "NeMo is not installed — run `uv sync --extra asr` (or use the Docker image), "
-                "or set TRANSCRIPT_ASR_PROVIDER=fake for a GPU-free run"
+                "transformers/torch are not installed — run `uv sync --extra asr` "
+                "(or use the Docker image), or set TRANSCRIPT_ASR_PROVIDER=fake"
             ) from exc
 
-        right = right_context_frames(self._chunk_ms)  # validated before touching the GPU
-        device = self._resolve_device(torch)
         logger.info(
-            "loading %s on %s (chunk_ms=%d, language=%s)",
-            self._model_name,
-            device,
-            self._chunk_ms,
-            self._language,
+            "loading %s (%s, chunk_ms=%d)", self._model_name, self._language, self._chunk_ms
         )
+        processor = AutoProcessor.from_pretrained(self._model_name)
+        supported = list(processor.supported_num_lookahead_tokens)
+        if self._lookahead_tokens not in supported:
+            raise TranscriptionFailed(
+                f"chunk_ms={self._chunk_ms} needs lookahead {self._lookahead_tokens}, "
+                f"unsupported by this model (supported: {supported})"
+            )
+        if self._language not in processor.prompt_dictionary:
+            raise TranscriptionFailed(
+                f"unsupported language {self._language!r} for {self._model_name}"
+            )
+        processor.set_num_lookahead_tokens(self._lookahead_tokens)
+
+        device_map = self._resolve_device_map(torch)
+        model = AutoModelForRNNT.from_pretrained(self._model_name, device_map=device_map)
+        model.eval()
 
         with self._lock:
-            model = ASRModel.from_pretrained(self._model_name, map_location=device)
-            if hasattr(model.encoder, "set_default_att_context_size"):
-                model.encoder.set_default_att_context_size(att_context_size=[56, right])
-            if hasattr(model, "set_inference_prompt"):
-                model.set_inference_prompt(self._language or "auto")
-            if hasattr(model, "change_decoding_strategy"):
-                model.change_decoding_strategy(RNNTDecodingConfig(fused_batch_size=-1))
-            decoding = getattr(model, "decoding", None)
-            if decoding is not None and hasattr(decoding, "set_strip_lang_tags"):
-                try:
-                    decoding.set_strip_lang_tags(True, lang_tag_pattern=None)
-                except TypeError:
-                    decoding.set_strip_lang_tags(True)  # older NeMo signature
-            model.eval()
-            self._torch = torch
+            self._processor = processor
             self._model = model
-            self._resolved_device = str(device)
+            self._resolved_device = (
+                "cuda" if torch.cuda.is_available() and self._device_pref != "cpu" else "cpu"
+            )
 
     def _unload_blocking(self) -> None:
         with self._lock:
+            sessions = list(self._sessions.values())
             self._sessions.clear()
             self._model = None
+            self._processor = None
+        for session in sessions:
+            session.set_abandoned()
+            self._join_session(session, CLOSE_JOIN_TIMEOUT_S)
         try:
             import torch
 
@@ -365,12 +393,14 @@ class NemotronTranscriber:
         except ImportError:
             pass
 
-    def _resolve_device(self, torch: Any) -> str:
-        if self._device_pref == "auto":
-            return "cuda" if torch.cuda.is_available() else "cpu"
-        if self._device_pref == "cuda" and not torch.cuda.is_available():
-            raise RuntimeError("TRANSCRIPT_DEVICE=cuda but no CUDA device is available")
-        return self._device_pref
+    def _resolve_device_map(self, torch: Any) -> str:
+        if self._device_pref == "cpu":
+            return "cpu"
+        if self._device_pref == "cuda":
+            if not torch.cuda.is_available():
+                raise RuntimeError("TRANSCRIPT_DEVICE=cuda but no CUDA device is available")
+            return "cuda"
+        return "auto"  # let accelerate place the model (cuda when available)
 
     # --- Transcriber port -----------------------------------------------
 
@@ -384,7 +414,10 @@ class NemotronTranscriber:
         return await asyncio.to_thread(self._finish_blocking, stream_id)
 
     async def close_stream(self, stream_id: str) -> None:
-        self._sessions.pop(stream_id, None)  # idempotent by contract
+        session = self._sessions.pop(stream_id, None)  # idempotent by contract
+        if session is not None:
+            session.set_abandoned()
+            await asyncio.to_thread(self._join_session, session, CLOSE_JOIN_TIMEOUT_S)
 
     def _open_blocking(self, stream_id: str) -> None:
         if self._model is None:
@@ -392,29 +425,40 @@ class NemotronTranscriber:
         with self._lock:
             if stream_id in self._sessions:
                 raise TranscriptionFailed(f"transcriber already has stream {stream_id!r}")
-            buffer = _LiveAudioBuffer(self._model, self._sample_rate)
-            channel, time, length = self._model.encoder.get_initial_cache_state(batch_size=1)
-            self._sessions[stream_id] = _StreamSession(
-                buffer=buffer,
-                cache_last_channel=channel,
-                cache_last_time=time,
-                cache_last_channel_len=length,
+            planner = ChunkPlanner(
+                first_samples=int(self._processor.num_samples_first_audio_chunk),
+                per_chunk_samples=int(self._processor.num_samples_per_audio_chunk),
+                first_mel=int(self._processor.num_mel_frames_first_audio_chunk),
+                per_mel=int(self._processor.num_mel_frames_per_audio_chunk),
+                hop_length=int(self._processor.feature_extractor.hop_length),
+                n_fft=int(self._processor.feature_extractor.n_fft),
             )
+            session = _StreamSession(stream_id, planner, self._sample_rate)
+            self._sessions[stream_id] = session
+        session.pump_thread = threading.Thread(
+            target=self._pump_target, args=(session,), name=f"asr-pump-{stream_id}", daemon=True
+        )
+        session.consumer_thread = threading.Thread(
+            target=self._consume_target,
+            args=(session,),
+            name=f"asr-consumer-{stream_id}",
+            daemon=True,
+        )
+        session.pump_thread.start()
+        session.consumer_thread.start()
 
     def _push_blocking(self, stream_id: str, pcm: bytes) -> list[Word]:
         session = self._require_session(stream_id)
-        with self._lock:
-            session.samples_pushed += len(pcm) // 2
-            session.buffer.feed(pcm)
-            new_text = self._decode_pending_chunks(session)
-            return self._extract_new_words(session, new_text, final=False)
+        session.append_pcm(pcm)
+        session.check_error()
+        return self._drain_new_words(session, final=False)
 
     def _finish_blocking(self, stream_id: str) -> list[Word]:
         session = self._require_session(stream_id)
-        with self._lock:
-            session.buffer.feed(b"", final=True)
-            new_text = self._decode_pending_chunks(session)
-            return self._extract_new_words(session, new_text, final=True)
+        session.set_eos()
+        self._join_session(session, PUMP_JOIN_TIMEOUT_S)
+        session.check_error()
+        return self._drain_new_words(session, final=True)
 
     def _require_session(self, stream_id: str) -> _StreamSession:
         if self._model is None:
@@ -424,54 +468,115 @@ class NemotronTranscriber:
         except KeyError:
             raise TranscriptionFailed(f"unknown transcriber stream {stream_id!r}") from None
 
-    # --- GPU decoding loop ----------------------------------------------
+    @staticmethod
+    def _join_session(session: _StreamSession, timeout_s: float) -> None:
+        for thread in (session.pump_thread, session.consumer_thread):
+            if thread is not None and thread.is_alive():
+                thread.join(timeout=timeout_s)
 
-    def _decode_pending_chunks(self, session: _StreamSession) -> str | None:
-        """Run encoder/decoder steps for every buffered chunk; return latest text."""
-        model = self._model
-        buffer = session.buffer.nemo_buffer
-        latest_text: str | None = None
+    # --- pump + consumer ------------------------------------------------
 
-        for chunk_audio, chunk_lengths in buffer:  # resumes where the last call stopped
-            drop = (
-                0
-                if (session.step == 0 and not buffer.pad_and_drop_preencoded)
-                else model.encoder.streaming_cfg.drop_extra_pre_encoded
+    def _pump_target(self, session: _StreamSession) -> None:
+        """Run one generate() call fed by live audio (documented pattern, live source)."""
+        try:
+            import torch
+            from transformers import TextIteratorStreamer
+
+            first_inputs = self._wait_first_inputs(session)
+            if first_inputs is None:
+                return  # abandoned before any audio / error already recorded
+            session.streamer = TextIteratorStreamer(
+                self._processor.tokenizer, skip_special_tokens=True
             )
-            with self._torch.inference_mode():
-                (
-                    session.previous_pred_out,
-                    hypotheses,
-                    session.cache_last_channel,
-                    session.cache_last_time,
-                    session.cache_last_channel_len,
-                    session.previous_hypotheses,
-                ) = model.conformer_stream_step(
-                    processed_signal=chunk_audio,
-                    processed_signal_length=chunk_lengths,
-                    cache_last_channel=session.cache_last_channel,
-                    cache_last_time=session.cache_last_time,
-                    cache_last_channel_len=session.cache_last_channel_len,
-                    keep_all_outputs=buffer.is_buffer_empty(),
-                    previous_hypotheses=session.previous_hypotheses,
-                    previous_pred_out=session.previous_pred_out,
-                    drop_extra_pre_encoded=drop,
-                    return_transcription=True,
-                )
-            session.step += 1
-            hypothesis = hypotheses[-1]
-            latest_text = getattr(hypothesis, "text", None) or str(hypothesis)
+            generate_kwargs: dict[str, Any] = {
+                **first_inputs,
+                "input_features": self._live_feature_generator(session),
+                "streamer": session.streamer,
+            }
+            with torch.inference_mode():
+                self._model.generate(**generate_kwargs)
+        except Exception as exc:  # fail loud: push/finish surface it, never stall silently
+            logger.exception("streaming pump failed for stream %s", session.stream_id)
+            session.set_error(exc)
+        finally:
+            session.pump_done = True
+            streamer = session.streamer
+            if streamer is not None:
+                with suppress(Exception):  # generate() usually ends it already
+                    streamer.end()
 
-        return latest_text
+    def _wait_first_inputs(self, session: _StreamSession) -> Any | None:
+        """Block until the first window is available; None when abandoned/failed."""
+        while True:
+            with session.condition:
+                if session.abandoned or session.error is not None:
+                    return None
+                plan = session.planner.plan(session.available, eos=session.eos)
+                if plan is None:
+                    if session.eos:
+                        return None  # ended with no audio at all
+                    session.condition.wait(timeout=0.5)
+                    continue
+            inputs = self._features_for(session, plan, is_first=True)
+            # Trim to the documented first-chunk mel width.
+            inputs["input_features"] = inputs["input_features"][:, : plan.mel_frames, :]
+            return inputs
 
-    def _extract_new_words(
-        self, session: _StreamSession, new_text: str | None, *, final: bool
-    ) -> list[Word]:
-        if new_text is None:
-            return []
-        clean = strip_language_tag(new_text)
-        word_texts = split_new_words(session.text, clean)
-        session.text = clean
+    def _live_feature_generator(self, session: _StreamSession) -> Iterator[Any]:
+        """Yield subsequent chunk features until end-of-stream (documented pattern)."""
+        while True:
+            with session.condition:
+                if session.abandoned or session.error is not None:
+                    return
+                plan = session.planner.plan(session.available, eos=session.eos)
+                if plan is None:
+                    if session.eos:
+                        return
+                    session.condition.wait(timeout=0.5)
+                    continue
+            inputs = self._features_for(session, plan, is_first=False)
+            yield inputs["input_features"]
+
+    def _features_for(self, session: _StreamSession, plan: ChunkPlan, *, is_first: bool) -> Any:
+        """Materialize a planned window and run the processor (documented call shape)."""
+
+        pcm_view = session.materialize(plan.start_sample, plan.end_sample)
+        session.drop_before(plan.start_sample)
+        inputs = self._processor(
+            pcm_view,
+            sampling_rate=session.sample_rate,
+            is_streaming=True,
+            is_first_audio_chunk=is_first,
+            language=self._language,
+            return_tensors="pt",
+        )
+        return inputs.to(self._model.device, dtype=self._model.dtype)
+
+    def _consume_target(self, session: _StreamSession) -> None:
+        """Drain the streamer into live text; ends when generate() finishes."""
+        while True:
+            streamer = session.streamer
+            if streamer is None:
+                if session.pump_done or session.abandoned:
+                    return
+                time.sleep(0.05)
+                continue
+            try:
+                for text_chunk in streamer:
+                    session.append_live_text(text_chunk)
+                return
+            except Exception:
+                logger.exception("streamer consumer failed for stream %s", session.stream_id)
+                return
+
+    # --- word attribution -----------------------------------------------
+
+    def _drain_new_words(self, session: _StreamSession, *, final: bool) -> list[Word]:
+        with session.condition:
+            live = session.live_text
+        clean = strip_language_tag(live)
+        word_texts = split_new_words(session.emitted_text, clean)
+        session.emitted_text = clean
         if not word_texts:
             return []
 

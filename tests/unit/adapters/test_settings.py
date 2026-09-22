@@ -13,7 +13,7 @@ def test_chunk_ms_accepts_int():
     assert Settings(chunk_ms=560).chunk_ms == 560
 
 
-@pytest.mark.parametrize("bad", ["100", "abc", ""])
+@pytest.mark.parametrize("bad", ["100", "160", "abc", ""])
 def test_chunk_ms_rejects_values_outside_the_supported_set(bad):
     with pytest.raises(ValueError, match="TRANSCRIPT_CHUNK_MS must be one of"):
         Settings(chunk_ms=bad)

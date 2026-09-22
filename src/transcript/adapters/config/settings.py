@@ -10,8 +10,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 _ASRT_PROVIDER = Literal["nemotron", "fake"]
 _DiarIZATION_PROVIDER = Literal["pyannote", "fake"]
 
-# Streaming chunk sizes the Nemotron model supports (latency/accuracy trade-off).
-CHUNK_MS_OPTIONS = (80, 160, 320, 560, 1120)
+# Streaming chunk sizes the Transformers port supports (latency/accuracy trade-off).
+# Note: 160 ms exists in NeMo but the Transformers port only supports [3, 0, 6, 13].
+CHUNK_MS_OPTIONS = (80, 320, 560, 1120)
 
 
 class Settings(BaseSettings):

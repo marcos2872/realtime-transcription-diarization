@@ -1,4 +1,4 @@
-"""Smoke tests for the real adapters: NeMo streaming + pyannote community-1.
+"""Smoke tests for the real adapters: Transformers streaming + pyannote community-1.
 
 These need the heavy extras, a CUDA GPU and model downloads, so they only run
 with ``RUN_GPU_TESTS=1``. Without the extras they skip gracefully.
@@ -22,7 +22,8 @@ THREE_SILENCE = ONE_SILENCE * 3
 
 @requires_gpu_env
 async def test_nemotron_loads_transcribes_and_tracks_audio_time():
-    pytest.importorskip("nemo", reason="nemo not installed (uv sync --extra asr)")
+    pytest.importorskip("transformers", reason="transformers not installed (uv sync --extra asr)")
+    pytest.importorskip("torch", reason="torch not installed (uv sync --extra asr)")
     from transcript.adapters.asr.nemotron_transcriber import NemotronTranscriber
 
     transcriber = NemotronTranscriber(
