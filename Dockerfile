@@ -3,11 +3,11 @@
 # runtime ships only the venv + source. Both stages share the same CUDA base
 # so the copied virtualenv keeps working (same interpreter paths).
 #
-# NOTE: gcc stays in the runtime image on purpose — torch>=2.14 dispatches
-# some ops to Triton kernels, and Triton JIT-compiles a small C shim at
-# inference time (its own ptxas is bundled; only the C compiler is missing
-# from the slim CUDA image). Without it every stream fails at the first
-# generate() with "Failed to find C compiler".
+# NOTE: build-essential + python3.12-dev stay in the runtime image on purpose —
+# torch>=2.14 dispatches some ops to Triton kernels, and Triton JIT-compiles a
+# small C driver shim at inference time (its own ptxas is bundled; the C
+# toolchain is missing from the slim CUDA image). Without it every stream
+# fails at the first generate() inside triton/backends/nvidia/driver.py.
 ARG CUDA_IMAGE=nvidia/cuda:12.6.1-cudnn-runtime-ubuntu24.04
 
 FROM ${CUDA_IMAGE} AS builder
@@ -36,10 +36,11 @@ ENV DEBIAN_FRONTEND=noninteractive \
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3.12 \
     python3.12-venv \
+    python3.12-dev \
+    build-essential \
     libsndfile1 \
     ffmpeg \
     curl \
-    gcc \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --create-home --shell /usr/sbin/nologin app \
     && mkdir -p /cache/huggingface \
