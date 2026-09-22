@@ -22,3 +22,10 @@ models/
 .idea/
 .vscode/
 .DS_Store
+
+# Node / Next.js (web/)
+node_modules/
+web/.next/
+web/out/
+*.tsbuildinfo
+next-env.d.ts

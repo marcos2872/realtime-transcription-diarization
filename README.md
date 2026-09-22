@@ -17,6 +17,7 @@ TRANSCRIPT_ASR_PROVIDER=fake TRANSCRIPT_DIARIZATION_PROVIDER=fake uv run transcr
 ```bash
 cp .env.example .env   # e preencha TRANSCRIPT_HF_TOKEN=hf_...
 docker compose up --build
+# API: http://localhost:8000 · front de teste: http://localhost:3000
 ```
 
 - Imagem multi-stage sobre `nvidia/cuda` com `uv sync --frozen` (build reproduzível via `uv.lock`).
@@ -50,3 +51,15 @@ Setas da dependência apontam para dentro: `adapters → application → domain`
 - `tests/unit/adapters` — helpers puros dos adapters
 - `tests/integration` — WebSocket + REST de ponta a ponta com providers fake (sem GPU)
 - `tests/integration/adapters` — smoke tests reais, marcados `@pytest.mark.gpu`
+
+## Front de teste (`web/`)
+
+Next.js + Tailwind (pt-BR) que sobe junto no compose. Todo o áudio é
+processado no browser e enviado como PCM16 mono 16 kHz pelo WebSocket:
+
+- **Ao vivo**: microfone → AudioWorklet → partial ao vivo + frases com falante
+- **Arquivo .mp3**: decode local → chunks de ~1 s → `end` → frases finais
+
+```bash
+cd web && npm install && npm run dev   # http://localhost:3000 (API em :8000)
+```

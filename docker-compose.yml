@@ -1,6 +1,10 @@
 # Usage:
 #   1. cp .env.example .env  (then set TRANSCRIPT_HF_TOKEN)
 #   2. docker compose up --build
+#   3. open http://localhost:3000 (test frontend) — API at http://localhost:8000
+#
+# The browser talks to the API directly, so WEB_API_URL must be reachable
+# from the browser (default assumes both run on the same host).
 services:
   transcript:
     build: .
@@ -23,6 +27,19 @@ services:
               count: all
               capabilities: [gpu]
     shm_size: 2gb
+    restart: unless-stopped
+
+  web:
+    build:
+      context: ./web
+      args:
+        NEXT_PUBLIC_API_BASE_URL: ${WEB_API_URL:-http://localhost:8000}
+    image: transcript-web:latest
+    ports:
+      - "${WEB_PORT:-3000}:3000"
+    depends_on:
+      transcript:
+        condition: service_healthy
     restart: unless-stopped
 
 volumes:
