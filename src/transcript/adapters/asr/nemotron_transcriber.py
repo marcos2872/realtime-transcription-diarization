@@ -84,6 +84,67 @@ def allocate_word_spans(
 # --- live audio feed --------------------------------------------------------
 
 
+def _as_int(value: object) -> int | None:
+    try:
+        number = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    return number if number > 0 else None
+
+
+def _cfg_number(cfg: object, *names: str) -> float | None:
+    """First present config value among ``names`` (OmegaConf-safe, no KeyError)."""
+    for name in names:
+        try:
+            if name in cfg:  # type: ignore[operator]
+                return float(cfg[name])  # type: ignore[index]
+        except Exception:
+            continue
+    return None
+
+
+def _resolve_stft_params(preprocessor: Any, cfg: Any, default_sample_rate: int) -> tuple[int, int]:
+    """Return ``(hop_length, n_fft)`` in samples for the model's frontend.
+
+    NeMo preprocessor configs differ per model (``hop_length`` vs
+    ``window_stride``, ``n_fft`` vs ``window_size``), so probe live module
+    attributes first, then config keys, and fail listing the available keys
+    when nothing matches.
+    """
+    featurizer = getattr(preprocessor, "featurizer", None)
+    hop = _as_int(getattr(featurizer, "hop_length", None)) or _as_int(
+        getattr(preprocessor, "hop_length", None)
+    )
+    win = (
+        _as_int(getattr(featurizer, "n_fft", None))
+        or _as_int(getattr(preprocessor, "n_fft", None))
+        or _as_int(getattr(preprocessor, "win_length", None))
+    )
+
+    sample_rate = _cfg_number(cfg, "sample_rate") or default_sample_rate
+    if hop is None:
+        hop = _as_int(_cfg_number(cfg, "hop_length"))
+        if hop is None:
+            stride_s = _cfg_number(cfg, "window_stride")
+            hop = _as_int(stride_s * sample_rate) if stride_s else None
+    if win is None:
+        win = _as_int(_cfg_number(cfg, "n_fft"))
+        if win is None:
+            size_s = _cfg_number(cfg, "window_size")
+            win = _as_int(size_s * sample_rate) if size_s else None
+
+    if hop is None or win is None:
+        try:
+            available = sorted(cfg.keys())
+        except Exception:
+            available = ["?"]
+        raise TranscriptionFailed(
+            "cannot determine STFT hop_length/n_fft from the NeMo preprocessor; "
+            f"preprocessor config keys: {available}"
+        )
+    return hop, win
+
+
 class _LiveAudioBuffer:
     """Seam-free, chunk-gated feed into NeMo's ``CacheAwareStreamingAudioBuffer``.
 
@@ -95,16 +156,16 @@ class _LiveAudioBuffer:
     preprocessor output itself tells us how many frames a piece really holds.
     """
 
-    def __init__(self, model: Any) -> None:
+    def __init__(self, model: Any, default_sample_rate: int = 16_000) -> None:
         from nemo.collections.asr.parts.utils.streaming_utils import (
             CacheAwareStreamingAudioBuffer,
         )
 
         self._nemo = CacheAwareStreamingAudioBuffer(model=model)
         self._preprocessor = self._nemo.preprocessor  # dither/pad-free copy owned by the buffer
-        cfg = model.cfg.preprocessor
-        self._hop = int(cfg.hop_length)
-        self._n_fft = int(cfg.n_fft)
+        self._hop, self._n_fft = _resolve_stft_params(
+            self._preprocessor, model.cfg.preprocessor, default_sample_rate
+        )
         self._left_context_frames = -(-self._n_fft // self._hop)  # ceil(n_fft / hop)
 
         shift = self._nemo.streaming_cfg.shift_size
@@ -331,7 +392,7 @@ class NemotronTranscriber:
         with self._lock:
             if stream_id in self._sessions:
                 raise TranscriptionFailed(f"transcriber already has stream {stream_id!r}")
-            buffer = _LiveAudioBuffer(self._model)
+            buffer = _LiveAudioBuffer(self._model, self._sample_rate)
             channel, time, length = self._model.encoder.get_initial_cache_state(batch_size=1)
             self._sessions[stream_id] = _StreamSession(
                 buffer=buffer,

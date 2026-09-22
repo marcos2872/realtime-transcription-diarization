@@ -1,13 +1,17 @@
 """Tests for the pure helpers of the Nemotron adapter (no GPU/model needed)."""
 
+from types import SimpleNamespace
+
 import pytest
 
 from transcript.adapters.asr.nemotron_transcriber import (
+    _resolve_stft_params,
     allocate_word_spans,
     right_context_frames,
     split_new_words,
     strip_language_tag,
 )
+from transcript.application.errors import TranscriptionFailed
 
 
 @pytest.mark.parametrize(
@@ -59,3 +63,38 @@ def test_allocate_word_spans_degenerate_span_yields_zero_length_words():
 
 def test_allocate_word_spans_without_words():
     assert allocate_word_spans(0, 0.0, 1.0) == []
+
+
+def test_resolve_stft_params_prefers_live_module_attributes():
+    preprocessor = SimpleNamespace(
+        hop_length=160, n_fft=512, featurizer=SimpleNamespace(hop_length=160, n_fft=512)
+    )
+
+    assert _resolve_stft_params(preprocessor, {}, 16_000) == (160, 512)
+
+
+def test_resolve_stft_params_reads_sample_counts_from_config():
+    preprocessor = SimpleNamespace(featurizer=None)
+    cfg = {"hop_length": 160, "n_fft": 512}
+
+    assert _resolve_stft_params(preprocessor, cfg, 16_000) == (160, 512)
+
+
+def test_resolve_stft_params_derives_samples_from_second_based_keys():
+    # Nemotron-style config: seconds instead of sample counts.
+    preprocessor = SimpleNamespace(featurizer=None)
+    cfg = {"sample_rate": 16000, "window_stride": 0.01, "window_size": 0.02}
+
+    assert _resolve_stft_params(preprocessor, cfg, 16_000) == (160, 320)
+
+
+def test_resolve_stft_params_falls_back_to_default_sample_rate():
+    preprocessor = SimpleNamespace(featurizer=None)
+    cfg = {"window_stride": 0.01, "window_size": 0.02}
+
+    assert _resolve_stft_params(preprocessor, cfg, 16_000) == (160, 320)
+
+
+def test_resolve_stft_params_fails_listing_available_keys():
+    with pytest.raises(TranscriptionFailed, match="preprocessor config keys"):
+        _resolve_stft_params(SimpleNamespace(featurizer=None), {"sample_rate": 16000}, 16_000)
