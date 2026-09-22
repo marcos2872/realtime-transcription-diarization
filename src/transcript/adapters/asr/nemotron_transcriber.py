@@ -142,7 +142,12 @@ class ChunkPlanner:
         self.last_start = 0
 
     def plan(self, available_samples: int, *, eos: bool) -> ChunkPlan | None:
-        """Next window fully covered by samples, or the padded tail at eos."""
+        """Next window fully covered by samples, or the padded tail at eos.
+
+        ``available_samples`` is the ABSOLUTE total pushed (not the trimmed
+        buffer length): windows are planned on the stream timeline and the
+        session trims only behind the last emitted start.
+        """
         if not self._first_done:
             if available_samples >= self._first_samples:
                 return self._emit_first(final=False)
@@ -204,6 +209,7 @@ class _StreamSession:
         self.pump_done = False
         self.pump_thread: threading.Thread | None = None
         self.consumer_thread: threading.Thread | None = None
+        self.first_features: Any = None
 
     # -- buffer (call with condition held unless noted) --------------------
 
@@ -485,12 +491,17 @@ class NemotronTranscriber:
             first_inputs = self._wait_first_inputs(session)
             if first_inputs is None:
                 return  # abandoned before any audio / error already recorded
+            with session.condition:
+                if session.abandoned or session.error is not None:
+                    return
+                first_features = session.first_features
+                session.first_features = None
             session.streamer = TextIteratorStreamer(
                 self._processor.tokenizer, skip_special_tokens=True
             )
             generate_kwargs: dict[str, Any] = {
                 **first_inputs,
-                "input_features": self._live_feature_generator(session),
+                "input_features": self._live_feature_generator(session, first_features),
                 "streamer": session.streamer,
             }
             with torch.inference_mode():
@@ -511,24 +522,31 @@ class NemotronTranscriber:
             with session.condition:
                 if session.abandoned or session.error is not None:
                     return None
-                plan = session.planner.plan(session.available, eos=session.eos)
+                # Absolute coordinates: the planner works on the total timeline,
+                # not on the trimmed buffer (see drop_before).
+                plan = session.planner.plan(session.samples_pushed, eos=session.eos)
                 if plan is None:
                     if session.eos:
                         return None  # ended with no audio at all
                     session.condition.wait(timeout=0.5)
                     continue
             inputs = self._features_for(session, plan, is_first=True)
-            # Trim to the documented first-chunk mel width.
+            # Trim to the documented first-chunk mel width and stash it: the
+            # feature generator must yield the first chunk itself.
             inputs["input_features"] = inputs["input_features"][:, : plan.mel_frames, :]
+            session.first_features = inputs["input_features"]
             return inputs
 
-    def _live_feature_generator(self, session: _StreamSession) -> Iterator[Any]:
-        """Yield subsequent chunk features until end-of-stream (documented pattern)."""
+    def _live_feature_generator(
+        self, session: _StreamSession, first_features: Any
+    ) -> Iterator[Any]:
+        """Yield the first chunk, then subsequent ones (documented pattern)."""
+        yield first_features
         while True:
             with session.condition:
                 if session.abandoned or session.error is not None:
                     return
-                plan = session.planner.plan(session.available, eos=session.eos)
+                plan = session.planner.plan(session.samples_pushed, eos=session.eos)
                 if plan is None:
                     if session.eos:
                         return
@@ -539,7 +557,6 @@ class NemotronTranscriber:
 
     def _features_for(self, session: _StreamSession, plan: ChunkPlan, *, is_first: bool) -> Any:
         """Materialize a planned window and run the processor (documented call shape)."""
-
         pcm_view = session.materialize(plan.start_sample, plan.end_sample)
         session.drop_before(plan.start_sample)
         inputs = self._processor(
