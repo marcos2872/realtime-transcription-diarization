@@ -4,11 +4,14 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _ASRT_PROVIDER = Literal["nemotron", "fake"]
 _DiarIZATION_PROVIDER = Literal["pyannote", "fake"]
+
+# Streaming chunk sizes the Nemotron model supports (latency/accuracy trade-off).
+CHUNK_MS_OPTIONS = (80, 160, 320, 560, 1120)
 
 
 class Settings(BaseSettings):
@@ -36,7 +39,10 @@ class Settings(BaseSettings):
     # --- ASR (transcription) ---
     asr_provider: _ASRT_PROVIDER = "nemotron"
     asr_model: str = "nvidia/nemotron-3.5-asr-streaming-0.6b"
-    chunk_ms: Literal[80, 160, 320, 560, 1120] = 320  # streaming chunk (latency/accuracy trade-off)
+    chunk_ms: int = Field(
+        default=320,
+        description="Streaming chunk size in ms (latency/accuracy trade-off).",
+    )
     lookahead_s: float = Field(
         default=1.4,
         ge=0.0,
@@ -58,6 +64,23 @@ class Settings(BaseSettings):
     # --- environment / credentials ---
     device: str = "auto"  # auto | cuda | cpu
     hf_token: str | None = None  # required by the gated pyannote community-1 pipeline
+
+    @field_validator("chunk_ms", mode="before")
+    @classmethod
+    def _coerce_chunk_ms(cls, value: object) -> int:
+        # Env vars always arrive as strings; Literal[int, ...] would reject
+        # '320', so coerce here and keep the friendly allowed-values check.
+        try:
+            number = int(str(value).strip())
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"TRANSCRIPT_CHUNK_MS must be one of {list(CHUNK_MS_OPTIONS)}, got {value!r}"
+            ) from None
+        if number not in CHUNK_MS_OPTIONS:
+            raise ValueError(
+                f"TRANSCRIPT_CHUNK_MS must be one of {list(CHUNK_MS_OPTIONS)}, got {value!r}"
+            )
+        return number
 
     @model_validator(mode="after")
     def _diarization_geometry_must_be_coherent(self) -> Settings:
