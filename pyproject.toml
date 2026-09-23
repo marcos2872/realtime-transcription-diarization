@@ -12,11 +12,11 @@ dependencies = [
     "sse-starlette>=0.2.4",
     "pydantic>=2.0.0",
     "pydantic-settings>=2.0.0",
-    "torch>=2.2,<2.9",  # pyannote 3.x usa torchaudio.AudioMetaData (removido no 2.9)
-    "torchaudio>=2.2,<2.9",  # idem — não subir para 2.9+ sem migrar pyannote para v4
+    "torch>=2.9",  # pyannote v4 exige torch 2.9+ (torchaudio 2.8 não combina com torch 2.9)
+    "torchaudio>=2.9",  # idem
     "huggingface-hub>=0.24.0",  # HF_TOKEN para download autenticado
     "requests>=2.28.0",
-    "pyannote.audio>=3.1.0,<4",  # v4+ muda API do Pipeline
+    "pyannote.audio>=4,<5",  # v4: I/O via torchcodec, token= em vez de use_auth_token
 ]
 
 [dependency-groups]

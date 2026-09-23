@@ -35,23 +35,11 @@ def _load_pipeline() -> Any:
         )
 
     import torch
-    from huggingface_hub import login as hf_login, hf_hub_download
+    from huggingface_hub import login as hf_login
 
-    # ── Monkey-patch: pyannote 3.4.0 usa `use_auth_token` (deprecated)
-    #     mas huggingface_hub >=0.20 removeu esse parâmetro.
-    #     Aqui embrulhamos a função original para converter.
-    _orig_download = hf_hub_download
-
-    def _patched_download(*args: Any, **kwargs: Any) -> str:
-        if "use_auth_token" in kwargs:
-            kwargs["token"] = kwargs.pop("use_auth_token")
-        return _orig_download(*args, **kwargs)
-
-    import huggingface_hub
-    huggingface_hub.hf_hub_download = _patched_download
-
-    # pyannote.audio 3.x usa huggingface_hub para autenticação;
-    # faz login antes de carregar o pipeline.
+    # pyannote.audio v4 usa `token` (o `use_auth_token` da v3 foi removido
+    # no upstream — o monkey-patch antigo foi deletado junto no upgrade).
+    # Faz login antes de carregar o pipeline (repositórios gated).
     hf_login(token=hf_token)
 
     logger.info("Carregando pyannote/speaker-diarization-3.1 ...")
@@ -59,7 +47,7 @@ def _load_pipeline() -> Any:
 
     pipeline = Pipeline.from_pretrained(
         "pyannote/speaker-diarization-3.1",
-        use_auth_token=hf_token,  # ← passa token explicitamente
+        token=hf_token,  # ← passa token explicitamente
     )
 
     # Move para GPU se disponível
