@@ -1,11 +1,9 @@
 import asyncio
 import concurrent.futures
 import logging
-import random
-from typing import Awaitable, Callable
 
 from src.config import settings
-from src.transcriber import Transcriber
+from src.infrastructure.asr.faster_whisper import Transcriber
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +30,6 @@ def _available_devices(requested: list[str]) -> list[str]:
 
 # Tipo para job da fila: (audio_path, language, future)
 JobResult = list[dict]
-JobCallback = Callable[[JobResult], Awaitable[None]]
 
 
 class TranscriptionJob:

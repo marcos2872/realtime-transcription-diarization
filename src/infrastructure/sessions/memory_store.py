@@ -1,49 +1,33 @@
 import asyncio
+import base64
+import io
 import logging
 import os
 import tempfile
 import time
 import uuid
-import io
-import wave
-import struct
-import base64
-from typing import Callable, Awaitable, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 from src.config import settings
-from src.schemas import PartialResult, TranscriptionResult, Segment
+from src.infrastructure.audio.wav import (
+    build_wav_from_pcm,
+    finalize_wav,
+    write_wav_header,
+)
 
 if TYPE_CHECKING:
-    from src.dispatcher import Dispatcher
+    from src.infrastructure.dispatching.queue import Dispatcher
 
 logger = logging.getLogger(__name__)
 
-OnPartial = Callable[[PartialResult], Awaitable[None]]
-OnFinal = Callable[[TranscriptionResult], Awaitable[None]]
-
 # ── Helpers para WAV parcial ──
+# Canônicos em src.infrastructure.audio.wav; mantidos aqui como alias
+# para compatibilidade com imports existentes.
 
 
 def _build_wav_from_pcm(pcm_data: bytes) -> bytes:
-    """Constrói um WAV completo a partir de PCM bruto."""
-    buf = io.BytesIO()
-    data_size = len(pcm_data)
-    # Header WAV
-    buf.write(b'RIFF')
-    buf.write(struct.pack('<I', 36 + data_size))
-    buf.write(b'WAVE')
-    buf.write(b'fmt ')
-    buf.write(struct.pack('<I', 16))
-    buf.write(struct.pack('<H', 1))   # PCM
-    buf.write(struct.pack('<H', 1))   # mono
-    buf.write(struct.pack('<I', 16000))
-    buf.write(struct.pack('<I', 32000))
-    buf.write(struct.pack('<H', 2))
-    buf.write(struct.pack('<H', 16))
-    buf.write(b'data')
-    buf.write(struct.pack('<I', data_size))
-    buf.write(pcm_data)
-    return buf.getvalue()
+    """Constrói um WAV completo a partir de PCM bruto (alias canônico)."""
+    return build_wav_from_pcm(pcm_data)
 
 
 class Session:
@@ -102,29 +86,16 @@ class Session:
         return self._last_transcribed_pos.get(channel, 0)
 
     def _write_wav_header(self, buf: io.BytesIO):
-        """Escreve header WAV placeholder (atualizado no final)."""
-        buf.write(b'RIFF')
-        buf.write(struct.pack('<I', 0))  # tamanho total (placeholder)
-        buf.write(b'WAVE')
-        buf.write(b'fmt ')
-        buf.write(struct.pack('<I', 16))          # chunk size
-        buf.write(struct.pack('<H', 1))            # PCM
-        buf.write(struct.pack('<H', 1))            # mono
-        buf.write(struct.pack('<I', 16000))        # sample rate
-        buf.write(struct.pack('<I', 32000))        # byte rate
-        buf.write(struct.pack('<H', 2))            # block align
-        buf.write(struct.pack('<H', 16))           # bits per sample
-        buf.write(b'data')
-        buf.write(struct.pack('<I', 0))            # data size (placeholder)
+        """Escreve header WAV placeholder (delega ao canônico)."""
+        write_wav_header(buf)
 
     def _finalize_wav(self, buf: io.BytesIO) -> bytes:
-        """Atualiza headers WAV e retorna o áudio completo."""
-        data_size = buf.tell() - 44  # 44 = tamanho do header
-        buf.seek(4)
-        buf.write(struct.pack('<I', 36 + data_size))
-        buf.seek(40)
-        buf.write(struct.pack('<I', data_size))
-        return buf.getvalue()
+        """Atualiza headers WAV e retorna o áudio completo (delega)."""
+        return finalize_wav(buf)
+
+    def cached_diarization(self, channel: str) -> list[dict] | None:
+        """Diarização em cache de um canal (usada no ``stop`` final)."""
+        return self._cached_diarization.get(channel)
 
     def get_audio(self, channel: str) -> bytes | None:
         """Retorna o WAV completo de um canal."""
@@ -193,7 +164,10 @@ class Session:
             segments: segmentos do Whisper (timestamps relativos ao chunk)
             pcm_offset: posição em bytes deste chunk no áudio acumulado
         """
-        from src.diarizer import assign_speakers, diarize as run_diarize
+        from src.infrastructure.diarization.pyannote import (
+            assign_speakers,
+            diarize as run_diarize,
+        )
 
         # Concatena o PCM acumulado completo
         full_pcm = b"".join(self._pcm_buffers.get("system", []))

@@ -152,3 +152,22 @@ def assign_speakers(
         result.append({**seg, "speaker": speaker})
 
     return result
+
+
+class PyannoteDiarizer:
+    """Adapter ``DiarizerPort`` sobre as funções deste módulo.
+
+    Permite injetar diarização nos use cases sem importar funções
+    globais (Dependency Inversion). Falhas de pipeline propagam
+    exceção — o use case decide o fallback (nunca 500).
+    """
+
+    def diarize(self, audio_path: str) -> list[dict[str, Any]]:
+        return diarize(audio_path)
+
+    def assign_speakers(
+        self,
+        transcript_segments: list[dict[str, Any]],
+        diarization: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        return assign_speakers(transcript_segments, diarization)
