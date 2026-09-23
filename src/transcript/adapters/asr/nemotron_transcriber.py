@@ -326,6 +326,12 @@ class NemotronTranscriber:
         self._resolved_device = device
         self._lock = threading.Lock()
         self._sessions: dict[str, _StreamSession] = {}
+        # The Transformers streaming mixin mutates instance state per generate()
+        # (it pops prompt_ids into self._prompt_ids and monkey-patches
+        # self.get_audio_features), so concurrent streams must not overlap
+        # inside generate(). The GPU serializes kernels anyway; the lock only
+        # makes the patch/unpatch window race-free.
+        self._generate_lock = threading.Lock()
 
     # --- lifecycle ------------------------------------------------------
 
@@ -372,6 +378,7 @@ class NemotronTranscriber:
         processor.set_num_lookahead_tokens(self._lookahead_tokens)
 
         device_map = self._resolve_device_map(torch)
+        logger.info("device_map=%s for %s", device_map, self._model_name)
         model = AutoModelForRNNT.from_pretrained(self._model_name, device_map=device_map)
         model.eval()
 
@@ -406,7 +413,16 @@ class NemotronTranscriber:
             if not torch.cuda.is_available():
                 raise RuntimeError("TRANSCRIPT_DEVICE=cuda but no CUDA device is available")
             return "cuda"
-        return "auto"  # let accelerate place the model (cuda when available)
+        # "auto": pin the whole model to the first GPU instead of letting
+        # accelerate shard it. Proven on a 2x RTX 4000 Ada box: device_map="auto"
+        # shards the 0.6B model across both cards (accelerate hooks active) and
+        # the first streaming generate() dies in the prompt one_hot with a
+        # ScatterGather index-out-of-bounds on valid prompt_ids ([101] < 128);
+        # the identical call with device_map="cuda:0" streams fine. The model
+        # (~2.5 GB) easily fits on one card, and all streams share it anyway.
+        if torch.cuda.is_available():
+            return "cuda:0"
+        return "cpu"
 
     # --- Transcriber port -----------------------------------------------
 
@@ -504,7 +520,7 @@ class NemotronTranscriber:
                 "input_features": self._live_feature_generator(session, first_features),
                 "streamer": session.streamer,
             }
-            with torch.inference_mode():
+            with torch.inference_mode(), self._generate_lock:
                 self._model.generate(**generate_kwargs)
         except Exception as exc:  # fail loud: push/finish surface it, never stall silently
             logger.exception("streaming pump failed for stream %s", session.stream_id)
