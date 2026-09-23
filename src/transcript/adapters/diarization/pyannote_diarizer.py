@@ -12,6 +12,7 @@ import asyncio
 import logging
 import re
 import threading
+import time
 from typing import Any
 
 import numpy as np
@@ -34,10 +35,22 @@ def parse_speaker(label: str) -> Speaker:
 
 
 class PyannoteDiarizer:
-    def __init__(self, *, pipeline_name: str, token: str | None, device: str = "auto") -> None:
+    def __init__(
+        self,
+        *,
+        pipeline_name: str,
+        token: str | None,
+        device: str = "auto",
+        threshold: float = 0.6,
+        min_speakers: int | None = None,
+        max_speakers: int | None = None,
+    ) -> None:
         self._pipeline_name = pipeline_name
         self._token = token
         self._device_pref = device
+        self._threshold = threshold
+        self._min_speakers = min_speakers
+        self._max_speakers = max_speakers
         self._pipeline: Any = None
         self._resolved_device = device
         self._lock = threading.Lock()
@@ -86,8 +99,22 @@ class PyannoteDiarizer:
             pipeline = Pipeline.from_pretrained(self._pipeline_name, token=self._token)
             if device == "cuda":
                 pipeline.to(torch.device("cuda"))  # like the official README
+            self._apply_threshold(pipeline)
             self._pipeline = pipeline
             self._resolved_device = device
+
+    def _apply_threshold(self, pipeline: Any) -> None:
+        """Override the VBx pre-clustering threshold, keeping every other default."""
+        defaults = pipeline.default_parameters() or {}
+        current = (defaults.get("clustering") or {}).get("threshold")
+        if current is None or current == self._threshold:
+            return
+        params = {
+            section: dict(values) for section, values in defaults.items() if isinstance(values, dict)
+        }
+        params.setdefault("clustering", {})["threshold"] = self._threshold
+        pipeline.instantiate(params)
+        logger.info("diarization clustering threshold: %s -> %s", current, self._threshold)
 
     def _unload_blocking(self) -> None:
         with self._lock:
@@ -124,10 +151,18 @@ class PyannoteDiarizer:
     def _diarize_blocking(self, pcm: bytes, sample_rate: int, offset: float) -> list[SpeakerTurn]:
         import torch
 
+        started = time.perf_counter()
         with self._lock:
             samples = np.frombuffer(pcm, dtype="<i2").astype(np.float32) / 32768.0
             waveform = torch.from_numpy(samples).unsqueeze(0)  # [channel, samples]
-            output = self._pipeline({"waveform": waveform, "sample_rate": sample_rate})
+            call_kwargs: dict[str, Any] = {}
+            if self._min_speakers is not None:
+                call_kwargs["min_speakers"] = self._min_speakers
+            if self._max_speakers is not None:
+                call_kwargs["max_speakers"] = self._max_speakers
+            output = self._pipeline(
+                {"waveform": waveform, "sample_rate": sample_rate}, **call_kwargs
+            )
             annotation = getattr(output, "speaker_diarization", output)
 
             turns: list[SpeakerTurn] = []
@@ -148,4 +183,15 @@ class PyannoteDiarizer:
                         speaker=parse_speaker(str(label)),
                     )
                 )
-            return turns
+        speech_s = sum(turn.timestamp.end - turn.timestamp.start for turn in turns)
+        speakers = sorted({turn.speaker.label for turn in turns})
+        logger.info(
+            "diarization run: window=%.1fs offset=%.1fs took=%.1fs turns=%d speech=%.1fs speakers=%s",
+            len(samples) / sample_rate,
+            offset,
+            time.perf_counter() - started,
+            len(turns),
+            speech_s,
+            speakers,
+        )
+        return turns

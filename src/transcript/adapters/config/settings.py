@@ -61,6 +61,25 @@ class Settings(BaseSettings):
         ge=0.0,
         description="Minimum audio before the first diarization run (avoid tiny windows).",
     )
+    diarization_threshold: float = Field(
+        default=0.6,
+        ge=0.0,
+        le=2.0,
+        description=(
+            "VBx pre-clustering threshold: lower splits voices more aggressively "
+            "(helps when two speakers get merged into one), higher merges more."
+        ),
+    )
+    diarization_min_speakers: int | None = Field(
+        default=None,
+        ge=1,
+        description="Force at least this many speakers (e.g. 2 for a known 2-person call).",
+    )
+    diarization_max_speakers: int | None = Field(
+        default=None,
+        ge=1,
+        description="Cap the speaker count (prevents one voice splitting into many).",
+    )
 
     # --- environment / credentials ---
     device: str = "auto"  # auto | cuda | cpu
@@ -93,6 +112,12 @@ class Settings(BaseSettings):
             raise ValueError("TRANSCRIPT_DIARIZATION_OVERLAP_S must be < window")
         if self.diarization_hop_s + self.diarization_overlap_s > self.diarization_window_s:
             raise ValueError("TRANSCRIPT_DIARIZATION_HOP_S + overlap must fit within the window")
+        if (
+            self.diarization_min_speakers is not None
+            and self.diarization_max_speakers is not None
+            and self.diarization_min_speakers > self.diarization_max_speakers
+        ):
+            raise ValueError("TRANSCRIPT_DIARIZATION_MIN_SPEAKERS must be <= MAX_SPEAKERS")
         return self
 
     @property

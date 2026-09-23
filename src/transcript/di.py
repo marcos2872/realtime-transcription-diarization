@@ -170,4 +170,7 @@ def _build_diarizer(settings: Settings) -> Diarizer:
         pipeline_name=settings.diarization_pipeline,
         token=settings.hf_token,
         device=settings.device,
+        threshold=settings.diarization_threshold,
+        min_speakers=settings.diarization_min_speakers,
+        max_speakers=settings.diarization_max_speakers,
     )
