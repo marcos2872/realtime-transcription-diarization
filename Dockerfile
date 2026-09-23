@@ -2,6 +2,11 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
+# FFmpeg do sistema: torchcodec (I/O de áudio do pyannote v4) linka
+# contra libavutil do sistema — sem ele, libtorchcodec_core*.so não carrega.
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
 # Instala uv
 RUN pip install uv --quiet
 
