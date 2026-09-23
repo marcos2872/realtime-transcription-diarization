@@ -6,22 +6,17 @@
 ## Visão geral
 
 Servidor FastAPI de transcrição remota: **faster-whisper `large-v3`**
-em múltiplas GPUs, **streaming** por chunks/SSE/WebSocket estilo Azure,
-**diarização** opcional (pyannote) e **refinamento** via LLM
-(llama.cpp + Qwen 2.5 7B).
+em GPU dedicada, **streaming** por chunks/SSE/WebSocket estilo Azure,
+**diarização** opcional (pyannote 4) e **refinamento** via LLM
+(llama.cpp + Qwen3-8B).
 
 ```
 ┌─────────────┐     ┌──────────────────┐     ┌─────────────┐
 │  Cliente     │────▶│  stt-api         │────▶│ llama-refine│
 │  (Electron)  │◀────│  (FastAPI)       │◀────│  (llama.cpp)│
-└─────────────┘     │                  │     └─────────────┘
-                    │  ┌─ GPU 0 ─┐      │
-                    │  │ Whisper  │      │
-                    │  └─────────┘      │
-                    │  ┌─ GPU 1 ─┐      │
-                    │  │ Whisper  │      │
-                    │  └─────────┘      │
-                    └──────────────────┘
+└─────────────┘     │  (GPU 1: Whisper  │     │ (GPU 0: só  │
+                    │   + pyannote)     │     │  Qwen3-8B)  │
+                    └──────────────────┘     └─────────────┘
 ```
 
 ## Camadas (Clean Architecture)
@@ -69,16 +64,28 @@ funcionando, mas código novo deve usar os caminhos canônicos.
 2. **Dispatcher com fila única + 1 worker por GPU.** Round-robin via
    fila, não por índice explícito. GPUs ausentes são filtradas via
    `torch.cuda.device_count()`; sem CUDA, fallback para `["cpu"]`.
-3. **pyannote `speaker-diarization-3.1` lazy e opcional.** Só carrega
-   com `diarize=true` + `HF_TOKEN`. Falha = fallback para locutor
-   genérico, nunca 500. Inclui monkey-patch documentado
-   (`use_auth_token` → `token`) pela incompatibilidade
-   pyannote 3.4.0 × `huggingface_hub>=0.20` — não remover.
-4. **Refine via llama.cpp (OpenAI-compatible).** Batches de 50
-   segmentos por chamada, `max_tokens=4096`. Fails open: erro no LLM
+3. **pyannote `speaker-diarization-3.1` sob `pyannote.audio` v4,
+   lazy + pré-carga no lifespan.** Só ativa com `diarize=true` +
+   `HF_TOKEN`. Falha = fallback para locutor genérico, nunca 500.
+   v4 lê áudio via torchcodec (exige ffmpeg no container) e devolve
+   `DiarizeOutput` (ler `.speaker_diarization`). Aceita
+   `num/min/max_speakers` — `min_speakers` evita fundir vozes
+   similares/minoritárias. Parciais SSE têm locutor best-effort
+   (estável entre flushes via sobreposição); o `stop` re-roda do
+   zero e é autoritativo.
+4. **Refine via llama.cpp (OpenAI-compatible), Qwen3-8B Q4_K_M.**
+   Batches de 50 segmentos por chamada, `max_tokens=4096`, thinking
+   desligado (`enable_thinking: False`). Fails open: erro no LLM
    retorna o original.
 5. **Wire camelCase estável.** `sessionId`, `tStart`/`tEnd`,
    `durationSec`. Mudança de wire = BREAKING CHANGE.
+6. **GPUs separadas (2x RTX 4000 Ada).** GPU 0 só `llama-refine`,
+   GPU 1 só `stt-api` (Whisper + pyannote) — sem briga por VRAM.
+   Troca-se vazão concorrente do Whisper (era round-robin em 2 GPUs)
+   por um refine maior e estável.
+7. **Runtime CUDA 12 para o ctranslate2.** torch 2.9+ traz cu13, mas
+   o engine do faster-whisper exige `libcublas.so.12` → deps diretas
+   `nvidia-cublas-cu12` + `nvidia-cudnn-cu12` (coexistem com cu13).
 
 ## Fluxos
 
@@ -106,6 +113,7 @@ a cada `interimIntervalMs`) → `end` → transcrição final →
 
 ## GPUs
 
-`stt-api` usa `CUDA_VISIBLE_DEVICES=0,1`; `llama-refine` fixa
+`stt-api` em `CUDA_VISIBLE_DEVICES=1` com `WHISPER_GPUS=cuda:0`
+(GPU física 1: Whisper + pyannote); `llama-refine` dedicado em
 `CUDA_VISIBLE_DEVICES=0` com `--main-gpu 0 --parallel 8
 --ctx-size 32768`. Sem CUDA, Whisper cai para CPU (bem mais lento).

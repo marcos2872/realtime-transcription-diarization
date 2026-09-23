@@ -36,7 +36,7 @@
   fallback documentado (genérico/original) — nunca 500 silencioso,
   nunca `except` vazio.
 - **Comentários explicam o porquê** (ex: afinidade CUDA por thread,
-  monkey-patch pyannote). O código já diz o quê.
+  `DiarizeOutput` da v4). O código já diz o quê.
 
 ## Como estender
 
@@ -59,10 +59,12 @@
    (contexto CUDA).
 2. `download_root="/app/models"` no Whisper.
 3. Flush parcial só de **bytes novos**; `<8000` bytes ignorado.
-4. Monkey-patch `hf_hub_download` em `diarization/pyannote.py`.
+4. `token=` (não `use_auth_token`) em `diarization/pyannote.py`
+   (pyannote v4).
 5. `sessionId` exigido no body **e** no path (compatibilidade).
-6. `models/` (Whisper + GGUF ~11GB) é local, fora do deploy rsync;
-   `entrypoint-refine.sh` re-baixa shards GGUF se ausentes/<10MB.
+6. `models/` (Whisper + GGUF) é local, fora do deploy rsync;
+   `entrypoint-refine.sh` baixa a lista `MODEL_FILES` se ausente/<10MB.
+7. Parciais SSE têm locutor best-effort; só o `stop` é autoritativo.
 
 ## Testes
 

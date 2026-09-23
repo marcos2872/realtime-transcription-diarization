@@ -1,9 +1,9 @@
 # STT API — Transcrição remota com Whisper
 
 Servidor FastAPI para transcrição de áudio com **Whisper `large-v3`**
-multi-GPU, **streaming** (SSE + WebSocket estilo Azure),
-**diarização** opcional (pyannote) e **refinamento** via LLM
-(Qwen 2.5 7B no llama.cpp).
+em GPU dedicada, **streaming** (SSE + WebSocket estilo Azure),
+**diarização** opcional (pyannote 4) e **refinamento** via LLM
+(Qwen3-8B no llama.cpp, em GPU dedicada).
 
 ## Quickstart
 

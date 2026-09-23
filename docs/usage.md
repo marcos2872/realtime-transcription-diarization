@@ -29,10 +29,10 @@ Copie `.env.example` para `.env`. Principais variáveis:
 |---|---|---|
 | `WHISPER_MODEL` | `large-v3` | Modelo Whisper |
 | `WHISPER_COMPUTE` | `int8_float16` | Tipo de computação (`int8` em CPU) |
-| `WHISPER_GPUS` | `cuda:0,cuda:1` | GPUs (round-robin) |
+| `WHISPER_GPUS` | `cuda:0` | GPUs do Whisper (no compose = só a física 1) |
 | `REFINE_BASE_URL` | `http://llama-refine:8080/v1` | URL do llama.cpp |
 | `REFINE_API_KEY` | — | Opcional |
-| `REFINE_MODEL` | `Qwen2.5-7B-Instruct` | Modelo de refinamento |
+| `REFINE_MODEL` | `Qwen3-8B` | Modelo de refinamento |
 | `HF_TOKEN` | — | HuggingFace (obrigatório p/ diarização) |
 | `MAX_FILE_SIZE_MB` | `500` | Limite de upload |
 | `SESSION_TIMEOUT_MIN` | `60` | Expiração de sessão |
@@ -46,7 +46,8 @@ curl -X POST http://localhost:4321/transcribe \
 ```
 
 Campos (multipart): `audio` (WAV), `language` (`pt`), `sessionId`
-(opcional), `diarize` (`false`). Resposta: `sessionId`, `segments`
+(opcional), `diarize` (`false`), `minSpeakers`/`maxSpeakers`
+(opcionais). Resposta: `sessionId`, `segments`
 (`speaker`, `text`, `tStart`, `tEnd`), `participants`,
 `durationSec`, `language`.
 
@@ -55,7 +56,8 @@ Campos (multipart): `audio` (WAV), `language` (`pt`), `sessionId`
 Teste manual pela aba SSE do front `web/` ou via curl:
 
 1. `POST /stream/{id}` body `{"sessionId":"{id}","action":"start",
-   "language":"pt","channels":["mic","system"],"diarize":true}`.
+   "language":"pt","channels":["mic","system"],"diarize":true,
+   "minSpeakers":2}` (este último evita fundir vozes similares).
    (`sessionId` vai no body **e** no path.)
 2. `POST /stream/{id}/audio` com
    `{"sessionId":"{id}","channel":"system","seq":1,"data":"base64..."}`.
@@ -85,9 +87,10 @@ manual pela aba WebSocket do front `web/`.
 ## Refine (`POST /refine`)
 
 ```json
-{"transcription": { "...TranscriptionResult..." }, "model": "Qwen2.5-7B-Instruct"}
+{"transcription": { "...TranscriptionResult..." }, "model": "Qwen3-8B"}
 ```
 
+Qwen3-8B Q4_K_M em GPU dedicada, thinking desligado.
 Refinamento em batches de 50 segmentos (`max_tokens=4096`). Falha
 no LLM retorna o original.
 
@@ -107,8 +110,11 @@ cd web && npm install && npm run dev   # http://localhost:3000
    `pyannote/segmentation-3.0`, criar token em
    `huggingface.co/settings/tokens` e definir `HF_TOKEN`. Sem acesso,
    fallback para `Locutor` (log + continua, sem 500).
-2. **pyannote × huggingface_hub.** `src/infrastructure/diarization/pyannote.py`
-   aplica monkey-patch `use_auth_token` → `token`. Não remover.
+2. **pyannote v4.** Auth com `token=` (o monkey-patch da v3 foi
+   removido); I/O via torchcodec exige ffmpeg no container
+   (`Dockerfile` instala); `pipeline()` devolve `DiarizeOutput`
+   (ler `.speaker_diarization`). Com vozes similares, use
+   `minSpeakers` — o clustering pode fundir a voz minoritária.
 3. **DNS corporativo.** Se UDP 53 externo for bloqueado, o build e o
    download de modelos falham — usar DNS do gateway local no
    `docker-compose.yml`.
