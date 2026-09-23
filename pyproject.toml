@@ -17,6 +17,11 @@ dependencies = [
     "huggingface-hub>=0.24.0",  # HF_TOKEN para download autenticado
     "requests>=2.28.0",
     "pyannote.audio>=4,<5",  # v4: I/O via torchcodec, token= em vez de use_auth_token
+    # Runtime CUDA 12 para o ctranslate2 (engine do faster-whisper), que
+    # exige libcublas.so.12 — o torch 2.9+ traz pacotes cu13 (.so.13).
+    # Pacotes têm nomes distintos (-cu12 vs sem sufixo), então coexistem.
+    "nvidia-cublas-cu12",
+    "nvidia-cudnn-cu12",
 ]
 
 [dependency-groups]
