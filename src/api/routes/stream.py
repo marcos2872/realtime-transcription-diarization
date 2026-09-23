@@ -47,6 +47,8 @@ async def stream_action(
             language=action.language,
             channels=action.channels,
             diarize=action.diarize,
+            min_speakers=action.minSpeakers,
+            max_speakers=action.maxSpeakers,
         )
         return {"ok": True, "sessionId": session.id}
 

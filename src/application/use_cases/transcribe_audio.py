@@ -27,6 +27,9 @@ async def transcribe_audio(
     transcriber: TranscriberPort,
     tmp_files: AudioTempFiles,
     diarizer: DiarizerPort | None = None,
+    num_speakers: int | None = None,
+    min_speakers: int | None = None,
+    max_speakers: int | None = None,
 ) -> TranscriptData:
     """Transcreve ``audio_bytes`` (WAV) e devolve o agregado de domínio."""
     sid = session_id or uuid.uuid4().hex[:12]
@@ -36,7 +39,12 @@ async def transcribe_audio(
         segments = await transcriber.dispatch(tmp_path, language)
         if diarize and diarizer is not None:
             try:
-                diarization = diarizer.diarize(tmp_path)
+                diarization = diarizer.diarize(
+                    tmp_path,
+                    num_speakers=num_speakers,
+                    min_speakers=min_speakers,
+                    max_speakers=max_speakers,
+                )
                 segments = diarizer.assign_speakers(segments, diarization)
             except Exception as exc:
                 logger.warning("Diarização falhou (continuando sem): %s", exc)

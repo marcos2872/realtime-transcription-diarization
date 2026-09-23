@@ -36,11 +36,14 @@ def _build_wav_from_pcm(pcm_data: bytes) -> bytes:
 class Session:
     """Representa uma sessão de streaming ativa."""
 
-    def __init__(self, session_id: str, language: str, channels: list[str], diarize: bool = False):
+    def __init__(self, session_id: str, language: str, channels: list[str], diarize: bool = False,
+                 min_speakers: int | None = None, max_speakers: int | None = None):
         self.id = session_id
         self.language = language
         self.channels = channels
         self.diarize = diarize
+        self.min_speakers = min_speakers
+        self.max_speakers = max_speakers
         self.created_at = time.time()
         self._buffers: dict[str, io.BytesIO] = {}
         self._pcm_buffers: dict[str, list[bytes]] = {}  # PCM bruto acumulado
@@ -182,7 +185,11 @@ class Session:
         try:
             tmp.write(wav_bytes)
             tmp.close()
-            diarization = run_diarize(tmp.name)
+            diarization = run_diarize(
+                tmp.name,
+                min_speakers=self.min_speakers,
+                max_speakers=self.max_speakers,
+            )
         finally:
             os.unlink(tmp.name)
 
@@ -245,9 +252,11 @@ class SessionManager:
         self._sessions: dict[str, Session] = {}
 
     def create(self, session_id: str | None = None, language: str = "pt",
-               channels: list[str] | None = None, diarize: bool = False) -> Session:
+               channels: list[str] | None = None, diarize: bool = False,
+               min_speakers: int | None = None, max_speakers: int | None = None) -> Session:
         sid = session_id or uuid.uuid4().hex[:12]
-        session = Session(sid, language, channels or ["mic", "system"], diarize=diarize)
+        session = Session(sid, language, channels or ["mic", "system"], diarize=diarize,
+                          min_speakers=min_speakers, max_speakers=max_speakers)
         self._sessions[sid] = session
         logger.info("Sessão criada: %s (diarize=%s)", sid, diarize)
         return session

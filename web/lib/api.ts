@@ -54,11 +54,13 @@ export async function transcribeBatch(
   wav: Blob,
   language: string,
   diarize: boolean,
+  minSpeakers: number | null = null,
 ): Promise<TranscriptionResult> {
   const form = new FormData();
   form.append("audio", wav, "audio.wav");
   form.append("language", language);
   form.append("diarize", String(diarize));
+  if (minSpeakers !== null) form.append("minSpeakers", String(minSpeakers));
   const res = await fetch(`${baseUrl}/transcribe`, { method: "POST", body: form });
   return (await check(res)) as TranscriptionResult;
 }
@@ -68,6 +70,7 @@ export async function streamStart(
   sessionId: string,
   language: string,
   diarize: boolean,
+  minSpeakers: number | null = null,
 ): Promise<void> {
   const res = await fetch(`${baseUrl}/stream/${sessionId}`, {
     method: "POST",
@@ -78,6 +81,7 @@ export async function streamStart(
       language,
       channels: ["system"],
       diarize,
+      minSpeakers,
     }),
   });
   await check(res);

@@ -24,7 +24,13 @@ class TranscriberPort(Protocol):
 class DiarizerPort(Protocol):
     """Diarização opcional (pyannote). Falha nunca deve gerar 500."""
 
-    def diarize(self, audio_path: str) -> list[dict]:
+    def diarize(
+        self,
+        audio_path: str,
+        num_speakers: int | None = None,
+        min_speakers: int | None = None,
+        max_speakers: int | None = None,
+    ) -> list[dict]:
         ...
 
     def assign_speakers(

@@ -31,7 +31,8 @@ export default function SseTab({ settings, addLog, onResult }: TabProps) {
     setPartials([]);
     setResult(null);
     addLog(`POST /stream/${sid} start (diarize=${settings.diarize})`);
-    await streamStart(settings.baseUrl, sid, settings.language, settings.diarize);
+    await streamStart(settings.baseUrl, sid, settings.language, settings.diarize,
+      settings.minSpeakers);
     closeEsRef.current = streamEvents(
       settings.baseUrl,
       sid,

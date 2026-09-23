@@ -28,16 +28,36 @@ class FakeTmp:
 
 
 class FakeDiarizer:
-    def __init__(self, fail=False):
+    def __init__(self, fail=False, fresh_speakers=None):
         self.fail = fail
+        self.fresh_speakers = fresh_speakers
+        self.calls = []
 
-    def diarize(self, audio_path):
+    def diarize(self, audio_path, num_speakers=None, min_speakers=None, max_speakers=None):
+        self.calls.append(audio_path)
         if self.fail:
             raise RuntimeError("sem HF_TOKEN")
+        if self.fresh_speakers is not None:
+            return [
+                {"speaker": s, "tStart": i * 5.0, "tEnd": (i + 1) * 5.0}
+                for i, s in enumerate(self.fresh_speakers)
+            ]
         return [{"speaker": "SPEAKER_00", "tStart": 0.0, "tEnd": 10.0}]
 
     def assign_speakers(self, segments, diarization):
-        return [{**s, "speaker": "Pessoa 1"} for s in segments]
+        if not diarization:
+            return segments
+        labels: dict[str, str] = {}
+        out = []
+        for s in segments:
+            mid = (s.get("tStart", 0) + s.get("tEnd", 0)) / 2
+            raw = next(
+                (d["speaker"] for d in diarization if d["tStart"] <= mid <= d["tEnd"]),
+                diarization[0]["speaker"],
+            )
+            labels.setdefault(raw, f"Pessoa {len(labels) + 1}")
+            out.append({**s, "speaker": labels[raw]})
+        return out
 
 
 class FakeSession:
@@ -109,3 +129,35 @@ def test_finalize_stream_regras_locutor():
     ))
     by_speaker = [s.speaker for s in out.segments]
     assert by_speaker == ["Eu", "Sistema"]
+
+
+def test_finalize_prefere_diarizacao_nova_ao_cache():
+    session = FakeSession(channels=("system",), diarize=True)
+    session.cached = [{"speaker": "OLD", "tStart": 0.0, "tEnd": 10.0}]
+    session.cached_diarization = lambda channel: session.cached  # noqa: E731
+    diarizer = FakeDiarizer(fresh_speakers=["NEW_A", "NEW_B"])
+    out = run(finalize_stream(
+        session,
+        FakeTranscriber([
+            {"speaker": "Locutor", "text": "x", "tStart": 0.0, "tEnd": 1.0},
+            {"speaker": "Locutor", "text": "y", "tStart": 6.0, "tEnd": 7.0},
+        ]),
+        FakeTmp(),
+        diarizer,
+    ))
+    assert diarizer.calls, "deveria re-rodar a diarização no stop"
+    assert out.participants == ["Pessoa 1", "Pessoa 2"]
+    assert "OLD" not in out.participants
+
+
+def test_finalize_cai_para_cache_se_nova_falhar():
+    session = FakeSession(channels=("system",), diarize=True)
+    session.cached = [{"speaker": "CACHED", "tStart": 0.0, "tEnd": 10.0}]
+    session.cached_diarization = lambda channel: session.cached  # noqa: E731
+    out = run(finalize_stream(
+        session,
+        FakeTranscriber([{"speaker": "Locutor", "text": "x", "tStart": 0.0, "tEnd": 1.0}]),
+        FakeTmp(),
+        FakeDiarizer(fail=True),
+    ))
+    assert out.participants == ["Pessoa 1"]

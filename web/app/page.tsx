@@ -20,6 +20,7 @@ export default function Home() {
     language: "pt",
     locale: "pt-BR",
     diarize: true,
+    minSpeakers: 2,
   });
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [healthErr, setHealthErr] = useState<string | null>(null);
@@ -54,7 +55,7 @@ export default function Home() {
     };
   }, [settings.baseUrl]);
 
-  const set = (k: keyof Settings) => (v: string | boolean) =>
+  const set = (k: keyof Settings) => (v: string | boolean | number | null) =>
     setSettings((o) => ({ ...o, [k]: v }));
 
   return (
@@ -90,6 +91,19 @@ export default function Home() {
             onChange={(e) => set("diarize")(e.target.checked)}
           />
           Diarizar
+        </label>
+        <label title="Piso de locutores (vazio = automático)">Min. falantes
+          <input
+            type="number"
+            min={1}
+            max={10}
+            placeholder="auto"
+            value={settings.minSpeakers ?? ""}
+            onChange={(e) => {
+              const v = e.target.value === "" ? null : Math.max(1, parseInt(e.target.value, 10) || 1);
+              set("minSpeakers")(v);
+            }}
+          />
         </label>
       </div>
 

@@ -47,6 +47,9 @@ class StreamAction(BaseModel):
     channels: list[str] = Field(default=["mic", "system"],
                                 description="Canais a capturar (`mic`, `system`).")
     diarize: bool = Field(default=True, description="Diarizar o canal `system` (requer `HF_TOKEN`).")
+    minSpeakers: int | None = Field(default=None,
+                                    description="Piso de locutores (evita mesclar vozes similares/minoritárias).")
+    maxSpeakers: int | None = Field(default=None, description="Teto de locutores.")
 
 
 class AudioChunk(BaseModel):

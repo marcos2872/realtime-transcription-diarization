@@ -174,7 +174,7 @@ async def speech_stream(websocket: WebSocket):
                     )
                     tmp_dz = save_upload_to_temp(wav_data)
                     try:
-                        diarization = run_diarize(tmp_dz)
+                        diarization = run_diarize(tmp_dz, max_speakers=cfg.maxSpeakers)
                     finally:
                         unlink_quietly(tmp_dz)
                     segments = assign_speakers(segments, diarization)

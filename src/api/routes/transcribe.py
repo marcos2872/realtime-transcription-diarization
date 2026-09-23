@@ -33,6 +33,8 @@ async def transcribe(
     language: str = Form("pt", description="Idioma (ISO 639-1).", examples=["pt"]),
     sessionId: str | None = Form(None, description="ID opcional para rastreamento."),
     diarize: bool = Form(False, description="Executar diarização (requer `HF_TOKEN`)."),
+    minSpeakers: int | None = Form(None, description="Piso de locutores."),
+    maxSpeakers: int | None = Form(None, description="Teto de locutores."),
     dispatcher=Depends(get_dispatcher),
     settings=Depends(get_settings),
 ) -> TranscriptionResult:
@@ -46,5 +48,7 @@ async def transcribe(
         transcriber=dispatcher,
         tmp_files=WavTempFiles(),
         diarizer=PyannoteDiarizer(),
+        min_speakers=minSpeakers,
+        max_speakers=maxSpeakers,
     )
     return to_wire(result)

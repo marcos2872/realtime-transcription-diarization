@@ -81,16 +81,34 @@ def preload() -> bool:
 
 def diarize(
     audio_path: str,
+    num_speakers: int | None = None,
+    min_speakers: int | None = None,
+    max_speakers: int | None = None,
 ) -> list[dict[str, Any]]:
     """Executa diarização em um arquivo WAV.
+
+    Args:
+        audio_path: WAV a diarizar.
+        num_speakers: força nº exato (quando conhecido).
+        min_speakers: piso — evita que vozes minoritárias/similares
+            sejam mescladas num cluster só.
+        max_speakers: teto.
 
     Returns:
         Lista de dicts: {speaker, tStart, tEnd}
     """
     pipeline = _load_pipeline()
 
-    logger.info("Diarizando %s ...", audio_path)
-    output = pipeline(audio_path)  # type: ignore
+    logger.info(
+        "Diarizando %s (num=%s min=%s max=%s) ...",
+        audio_path, num_speakers, min_speakers, max_speakers,
+    )
+    output = pipeline(  # type: ignore
+        audio_path,
+        num_speakers=num_speakers,
+        min_speakers=min_speakers,
+        max_speakers=max_speakers,
+    )
 
     # pyannote v4 devolve DiarizeOutput (com .speaker_diarization), não
     # mais um Annotation direto como na v3. Mantém compat com ambos.
@@ -170,8 +188,19 @@ class PyannoteDiarizer:
     exceção — o use case decide o fallback (nunca 500).
     """
 
-    def diarize(self, audio_path: str) -> list[dict[str, Any]]:
-        return diarize(audio_path)
+    def diarize(
+        self,
+        audio_path: str,
+        num_speakers: int | None = None,
+        min_speakers: int | None = None,
+        max_speakers: int | None = None,
+    ) -> list[dict[str, Any]]:
+        return diarize(
+            audio_path,
+            num_speakers=num_speakers,
+            min_speakers=min_speakers,
+            max_speakers=max_speakers,
+        )
 
     def assign_speakers(
         self,

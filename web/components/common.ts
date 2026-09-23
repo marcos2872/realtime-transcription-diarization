@@ -6,6 +6,7 @@ export interface Settings {
   language: string;
   locale: string;
   diarize: boolean;
+  minSpeakers: number | null;
 }
 
 export interface TabProps {

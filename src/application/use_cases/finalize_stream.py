@@ -2,9 +2,10 @@
 
 Transcreve cada canal acumulado, aplica ``apply_stop_rules``
 (``mic`` → ``Eu``; ``system`` sem diarize → ``Sistema``) e monta o
-``TranscriptData`` final. Diarização do canal ``system`` usa o cache
-parcial da sessão quando disponível, senão roda do zero — falha
-sempre faz fallback, nunca 500.
+``TranscriptData`` final. A diarização do canal ``system`` sempre
+re-roda do zero no áudio completo (autoritativa); o cache parcial
+só é usado como fallback se a nova execução falhar. Falha total
+faz fallback para genérico, nunca 500.
 """
 
 from __future__ import annotations
@@ -34,12 +35,7 @@ async def finalize_stream(
         try:
             segments = await transcriber.dispatch(tmp_path, session.language)
             if channel == "system" and session.diarize and diarizer is not None:
-                try:
-                    cached = session.cached_diarization("system")
-                    diarization = cached if cached is not None else diarizer.diarize(tmp_path)
-                    segments = diarizer.assign_speakers(segments, diarization)
-                except Exception as exc:
-                    logger.warning("Diarização final falhou: %s", exc)
+                segments = await _diarize_channel(session, diarizer, tmp_path, segments)
             segments = apply_stop_rules(segments, channel, session.diarize)
             all_segments.extend(segments)
         finally:
@@ -47,3 +43,25 @@ async def finalize_stream(
     return build_transcript(
         session.id, all_segments, session.duration_sec, session.language
     )
+
+
+async def _diarize_channel(session, diarizer: DiarizerPort, tmp_path: str,
+                           segments: list[dict]) -> list[dict]:
+    """Diariza do zero (autoritativo); cai para o cache parcial se falhar."""
+    hints = {
+        "min_speakers": getattr(session, "min_speakers", None),
+        "max_speakers": getattr(session, "max_speakers", None),
+    }
+    try:
+        diarization = diarizer.diarize(tmp_path, **hints)
+        return diarizer.assign_speakers(segments, diarization)
+    except Exception as exc:
+        logger.warning("Diarização final falhou (%s); tentando cache parcial", exc)
+    try:
+        cached = session.cached_diarization("system")
+        if cached is None:
+            raise RuntimeError("sem cache parcial")
+        return diarizer.assign_speakers(segments, cached)
+    except Exception as exc:
+        logger.warning("Diarização final sem fallback: %s", exc)
+        return segments

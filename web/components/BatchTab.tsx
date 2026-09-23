@@ -56,7 +56,8 @@ export default function BatchTab({ settings, addLog, onResult }: TabProps) {
     try {
       addLog(`POST /transcribe (diarize=${settings.diarize})`);
       const r = await transcribeBatch(
-        settings.baseUrl, wavRef.current, settings.language, settings.diarize);
+        settings.baseUrl, wavRef.current, settings.language, settings.diarize,
+        settings.minSpeakers);
       setResult(r);
       onResult(r);
       addLog("→ /transcribe", { segments: r.segments.length, participants: r.participants });
