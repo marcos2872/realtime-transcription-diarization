@@ -115,3 +115,10 @@ cd web && npm install && npm run dev   # http://localhost:3000
 4. **Parciais SSE.** Cada flush transcreve só o áudio novo; segmentos
    podem atrasar/duplicar entre parciais e final.
 5. **CPU fallback.** Sem CUDA o Whisper roda em CPU (bem mais lento).
+
+6. **`torchaudio` sem `AudioMetaData`.** Erro
+   `module 'torchaudio' has no attribute 'AudioMetaData'` significa
+   imagem com torchaudio 2.9+ (pyannote 3.x é incompatível —
+   upstream marcou wontfix). O `pyproject.toml` pina
+   `torch/torchaudio<2.9`: rebuild com o `uv.lock` atual
+   (`docker compose up --build -d`) resolve.

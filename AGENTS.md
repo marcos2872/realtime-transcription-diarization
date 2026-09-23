@@ -44,6 +44,7 @@ Clean Architecture — dependências apontam para dentro (`api → application �
 - Audio must be WAV 16kHz 16-bit mono; duration estimated as `(file_size-44)/32000`. Stereo must be downmixed client-side.
 - Streaming speaker rules in `domain/services/speaker_rules.py:apply_stop_rules`: `mic` → `Eu`; `system` without diarize → `Sistema`. Diarization failure falls back to generic, never 500s.
 - `infrastructure/diarization/pyannote.py` monkey-patches `huggingface_hub.hf_hub_download` (`use_auth_token` → `token`) — pyannote 3.4.0 vs `huggingface_hub>=0.20` incompatibility. Do not remove.
+- torch/torchaudio são pinados `<2.9`: pyannote 3.x importa `torchaudio.AudioMetaData` (removido no 2.9; upstream wontfix — migrar p/ pyannote v4 um dia). Erro típico em imagem stale: `Diarização parcial falhou: module 'torchaudio' has no attribute 'AudioMetaData'` — rebuild com o `uv.lock` atual resolve. Também pinado `pyannote.audio<4` (v4 muda a API do Pipeline).
 - Diarization needs `HF_TOKEN` **plus** accepting terms on both `pyannote/speaker-diarization-3.1` and `pyannote/segmentation-3.0`. Missing token = silent fallback, not error.
 - `models/` (Whisper + `qwen2.5-7b-instruct-q4_k_m` 2×~2GB shards) is local-only, excluded from `deploy.sh` rsync (also excludes `.venv`, `.env`, `.git`). `entrypoint-refine.sh` re-downloads GGUF shards if missing or <10MB.
 - Corporate DNS blocking UDP 53 can break Docker build/model download — use local gateway DNS in compose if needed (see `docs/usage.md`).
