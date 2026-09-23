@@ -7,7 +7,9 @@ lifespan (dispatcher start/stop), CORS, routers e ``app.state``.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import os
 from contextlib import asynccontextmanager
 
 import uvicorn
@@ -45,6 +47,12 @@ async def lifespan(app: FastAPI):
     app.state.sessions = SessionManager()
     app.state.refiner = Refiner()
     await app.state.dispatcher.start()
+    if settings.hf_token or os.getenv("HF_TOKEN"):
+        # Pré-carga do pyannote (bloqueante → thread) para a primeira
+        # diarização não pagar download + carga + ida para GPU.
+        from src.infrastructure.diarization.pyannote import preload as preload_diarizer
+
+        await asyncio.to_thread(preload_diarizer)
     logger.info(
         "Servidor pronto: %d GPU(s) | %s",
         len(app.state.dispatcher._transcribers),

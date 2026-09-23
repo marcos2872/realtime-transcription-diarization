@@ -62,6 +62,23 @@ def _load_pipeline() -> Any:
     return pipeline
 
 
+def preload() -> bool:
+    """Pré-carrega o pipeline (uso no lifespan da API).
+
+    Evita o delay da primeira transcrição com diarização (download +
+    carga do modelo + ida para GPU). Devolve ``False`` sem levantar
+    se `HF_TOKEN` estiver ausente ou a carga falhar — a carga lazy
+    na primeira requisição continua valendo.
+    """
+    try:
+        _load_pipeline()
+        logger.info("Pyannote pré-carregado no startup")
+        return True
+    except Exception as exc:
+        logger.warning("Pré-carga do pyannote pulada: %s", exc)
+        return False
+
+
 def diarize(
     audio_path: str,
 ) -> list[dict[str, Any]]:
