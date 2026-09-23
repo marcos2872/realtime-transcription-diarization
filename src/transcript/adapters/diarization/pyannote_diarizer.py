@@ -110,7 +110,9 @@ class PyannoteDiarizer:
         if current is None or current == self._threshold:
             return
         params = {
-            section: dict(values) for section, values in defaults.items() if isinstance(values, dict)
+            section: dict(values)
+            for section, values in defaults.items()
+            if isinstance(values, dict)
         }
         params.setdefault("clustering", {})["threshold"] = self._threshold
         pipeline.instantiate(params)
@@ -186,7 +188,8 @@ class PyannoteDiarizer:
         speech_s = sum(turn.timestamp.end - turn.timestamp.start for turn in turns)
         speakers = sorted({turn.speaker.label for turn in turns})
         logger.info(
-            "diarization run: window=%.1fs offset=%.1fs took=%.1fs turns=%d speech=%.1fs speakers=%s",
+            "diarization run: window=%.1fs offset=%.1fs took=%.1fs "
+            "turns=%d speech=%.1fs speakers=%s",
             len(samples) / sample_rate,
             offset,
             time.perf_counter() - started,
