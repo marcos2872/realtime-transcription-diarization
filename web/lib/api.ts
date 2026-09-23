@@ -1,53 +1,162 @@
-"use client";
+// Cliente HTTP da STT API (batch, streaming SSE, refine, health).
+// O streaming WebSocket usa a API nativa do browser (ver WsTab).
 
-/** Tipos do contrato da API (espelho de docs/api-contract.md). */
-
-export interface ReadyEvent {
-  type: "ready";
-  stream_id: string;
-  language: string;
-  sample_rate: number;
-  max_streams: number;
-  partials: boolean;
-}
-
-export interface Utterance {
-  type: "utterance";
-  stream_id: string;
-  utterance_id: number;
-  start: number;
-  end: number;
+export interface Segment {
   speaker: string;
   text: string;
+  tStart: number;
+  tEnd: number;
 }
 
-export interface ErrorEvent {
-  type: "error";
-  code: string;
-  message: string;
-  fatal: boolean;
+export interface TranscriptionResult {
+  sessionId: string;
+  segments: Segment[];
+  participants: string[];
+  durationSec: number;
+  language: string;
 }
 
-export type ServerEvent =
-  | ReadyEvent
-  | { type: "partial"; stream_id: string; text: string }
-  | Utterance
-  | ErrorEvent
-  | { type: "closed"; stream_id: string }
-  | { type: "pong" };
-
-export type ConnectionState = "idle" | "connecting" | "open" | "closing" | "error";
-
-export function formatTime(seconds: number): string {
-  const total = Math.max(0, Math.floor(seconds));
-  const minutes = Math.floor(total / 60);
-  const secs = total % 60;
-  return `${String(minutes).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
+export interface HealthResponse {
+  status: string;
+  gpus: string[];
+  whisperLoaded: boolean;
+  refineEndpoint: string;
+  activeSessions: number;
 }
 
-/** Monta a URL do WebSocket a partir da base HTTP(S) configurada. */
-export function toWebSocketUrl(httpBase: string, streamId: string, partials: boolean): string {
-  const base = httpBase.replace(/\/$/, "");
-  const ws = base.replace(/^http/, "ws");
-  return `${ws}/ws/streams/${encodeURIComponent(streamId)}?partials=${partials ? "true" : "false"}`;
+export interface PartialResult {
+  channel: string;
+  speaker: string;
+  text: string;
+  tStart: number;
+  tEnd: number;
+  isFinal: boolean;
+}
+
+export function newSessionId(): string {
+  return Array.from(crypto.getRandomValues(new Uint8Array(6)))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+async function check(res: Response): Promise<unknown> {
+  if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
+  return res.json();
+}
+
+export async function getHealth(baseUrl: string): Promise<HealthResponse> {
+  const res = await fetch(`${baseUrl}/health`);
+  return (await check(res)) as HealthResponse;
+}
+
+export async function transcribeBatch(
+  baseUrl: string,
+  wav: Blob,
+  language: string,
+  diarize: boolean,
+): Promise<TranscriptionResult> {
+  const form = new FormData();
+  form.append("audio", wav, "audio.wav");
+  form.append("language", language);
+  form.append("diarize", String(diarize));
+  const res = await fetch(`${baseUrl}/transcribe`, { method: "POST", body: form });
+  return (await check(res)) as TranscriptionResult;
+}
+
+export async function streamStart(
+  baseUrl: string,
+  sessionId: string,
+  language: string,
+  diarize: boolean,
+): Promise<void> {
+  const res = await fetch(`${baseUrl}/stream/${sessionId}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      sessionId,
+      action: "start",
+      language,
+      channels: ["system"],
+      diarize,
+    }),
+  });
+  await check(res);
+}
+
+export async function streamSendAudio(
+  baseUrl: string,
+  sessionId: string,
+  seq: number,
+  dataB64: string,
+): Promise<void> {
+  const res = await fetch(`${baseUrl}/stream/${sessionId}/audio`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ sessionId, channel: "system", seq, data: dataB64 }),
+  });
+  await check(res);
+}
+
+export async function streamStop(
+  baseUrl: string,
+  sessionId: string,
+  language: string,
+): Promise<TranscriptionResult> {
+  const res = await fetch(`${baseUrl}/stream/${sessionId}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      sessionId,
+      action: "stop",
+      language,
+      channels: ["system"],
+    }),
+  });
+  return (await check(res)) as TranscriptionResult;
+}
+
+export function streamEvents(
+  baseUrl: string,
+  sessionId: string,
+  onPartial: (p: PartialResult) => void,
+  onClosed: () => void,
+  onError: (msg: string) => void,
+): () => void {
+  const es = new EventSource(`${baseUrl}/stream/${sessionId}/events`);
+  es.addEventListener("partial", (e) => {
+    try {
+      onPartial(JSON.parse((e as MessageEvent).data) as PartialResult);
+    } catch {
+      // ignora payload malformado
+    }
+  });
+  es.addEventListener("heartbeat", (e) => {
+    if ((e as MessageEvent).data === "closed") {
+      es.close();
+      onClosed();
+    }
+  });
+  es.onerror = () => {
+    es.close();
+    onError("conexão SSE encerrada");
+  };
+  return () => es.close();
+}
+
+export async function refineTranscription(
+  baseUrl: string,
+  transcription: TranscriptionResult,
+): Promise<TranscriptionResult> {
+  const res = await fetch(`${baseUrl}/refine`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ transcription }),
+  });
+  const data = (await check(res)) as { refined: TranscriptionResult };
+  return data.refined;
+}
+
+export function toWsUrl(baseUrl: string): string {
+  const u = baseUrl.replace(/^http/, "ws").replace(/\/$/, "");
+  return `${u}/speech/stream`;
 }

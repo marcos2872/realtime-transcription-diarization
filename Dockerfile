@@ -1,57 +1,33 @@
-# syntax=docker/dockerfile:1
-# Multi-stage: builder resolves/installs everything with uv (frozen lock),
-# runtime ships only the venv + source. Both stages share the same CUDA base
-# so the copied virtualenv keeps working (same interpreter paths).
-#
-# NOTE: build-essential + python3.12-dev stay in the runtime image on purpose —
-# torch>=2.14 dispatches some ops to Triton kernels, and Triton JIT-compiles a
-# small C driver shim at inference time (its own ptxas is bundled; the C
-# toolchain is missing from the slim CUDA image). Without it every stream
-# fails at the first generate() inside triton/backends/nvidia/driver.py.
-ARG CUDA_IMAGE=nvidia/cuda:12.6.1-cudnn-runtime-ubuntu24.04
+FROM python:3.12-slim
 
-FROM ${CUDA_IMAGE} AS builder
-ENV DEBIAN_FRONTEND=noninteractive \
-    UV_LINK_MODE=copy \
-    UV_PYTHON=/usr/bin/python3.12
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3.12 \
-    python3.12-venv \
-    ca-certificates \
-    curl \
-    && rm -rf /var/lib/apt/lists/*
-COPY --from=ghcr.io/astral-sh/uv:0.8 /uv /uvx /bin/
 WORKDIR /app
-# Dependencies first (cached layer), source afterwards.
-COPY pyproject.toml uv.lock .python-version README.md ./
-RUN uv sync --frozen --no-dev --extra asr --extra diarization
-COPY src ./src
-RUN uv sync --frozen --no-dev --extra asr --extra diarization
 
-FROM ${CUDA_IMAGE} AS runtime
-ENV DEBIAN_FRONTEND=noninteractive \
-    PYTHONUNBUFFERED=1 \
-    HF_HOME=/cache/huggingface \
-    UV_PYTHON=/usr/bin/python3.12
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3.12 \
-    python3.12-venv \
-    python3.12-dev \
-    build-essential \
-    libsndfile1 \
-    ffmpeg \
-    curl \
-    && rm -rf /var/lib/apt/lists/* \
-    && useradd --create-home --shell /usr/sbin/nologin app \
-    && mkdir -p /cache/huggingface \
-    && chown -R app:app /cache/huggingface
-WORKDIR /app
-COPY --from=builder --chown=app:app /app/.venv /app/.venv
-COPY --from=builder --chown=app:app /app/src /app/src
-COPY --chown=app:app pyproject.toml ./
-USER app
+# Instala uv
+RUN pip install uv --quiet
+
+# Copia dependências primeiro (cache de camada)
+COPY pyproject.toml uv.lock ./
+RUN uv sync --frozen --no-dev
+
+# Pré-baixa modelos do pyannote (diarização)
+RUN --mount=type=secret,id=HF_TOKEN,env=HF_TOKEN \
+    if [ -n "$HF_TOKEN" ]; then \
+        uv run python -c "\
+from huggingface_hub import login, snapshot_download;\
+login(token='$HF_TOKEN');\
+snapshot_download('pyannote/speaker-diarization-3.1');\
+snapshot_download('pyannote/segmentation-3.0');\
+print('Modelos pyannote baixados');\
+" || echo "Aviso: não foi possível baixar modelos pyannote"; \
+    else \
+        echo "HF_TOKEN não definido, pyannote baixará modelos sob demanda"; \
+    fi
+
+# Copia código
+COPY src/ src/
+COPY .env.example .env
+
+# Porta da API
 EXPOSE 8000
-# Model loading takes a while on first boot: generous start-period.
-HEALTHCHECK --interval=30s --timeout=10s --start-period=180s --retries=3 \
-    CMD curl -f http://localhost:8000/health || exit 1
-ENTRYPOINT ["/app/.venv/bin/transcript-server"]
+
+CMD ["uv", "run", "uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8000"]

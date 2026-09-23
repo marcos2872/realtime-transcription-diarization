@@ -1,246 +1,114 @@
 "use client";
 
-import { useRef, useState } from "react";
-import { CHUNK_BYTES, TARGET_SAMPLE_RATE, decodeAudioFile, splitIntoChunks, toPCM16Mono16k } from "../lib/audio";
-import { startMicCapture } from "../lib/mic";
-import { useTranscriptionStream, type StreamOptions } from "../lib/useTranscriptionStream";
-import { StatusBar, UtteranceList } from "../components/transcript-ui";
+import { useCallback, useEffect, useState } from "react";
+import BatchTab from "../components/BatchTab";
+import HealthBar from "../components/HealthBar";
+import NetLog, { type NetEntry } from "../components/NetLog";
+import RefineTab from "../components/RefineTab";
+import SseTab from "../components/SseTab";
+import WsTab from "../components/WsTab";
+import { now, type Settings } from "../components/common";
+import { getHealth, type HealthResponse, type TranscriptionResult } from "../lib/api";
 
-const DEFAULT_API_BASE =
-  process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
+type Tab = "batch" | "sse" | "ws" | "refine";
 
-function randomStreamId(prefix: string): string {
-  return `${prefix}-${Math.random().toString(36).slice(2, 8)}`;
-}
-
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <label className="flex flex-col gap-1 text-sm text-zinc-400">
-      {label}
-      {children}
-    </label>
-  );
-}
-
-const inputClass =
-  "rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-sky-500";
-
+/** Página única com 4 abas (batch, SSE, WebSocket, refine) + health + log. */
 export default function Home() {
-  const [apiBase, setApiBase] = useState(DEFAULT_API_BASE);
-  const [partials, setPartials] = useState(true);
-  const [tab, setTab] = useState<"live" | "file">("live");
-  const [testingApi, setTestingApi] = useState(false);
-  const [apiStatus, setApiStatus] = useState<{ ok: boolean; detail: string } | null>(null);
-  const stream = useTranscriptionStream();
-  const micRef = useRef<{ stop: () => void } | null>(null);
-  const [recording, setRecording] = useState(false);
-  const [fileName, setFileName] = useState<string | null>(null);
-  const [sending, setSending] = useState(false);
-
-  const options = (prefix: string): StreamOptions => ({
-    httpBase: apiBase,
-    streamId: randomStreamId(prefix),
-    partials,
+  const [tab, setTab] = useState<Tab>("batch");
+  const [settings, setSettings] = useState<Settings>({
+    baseUrl: "http://localhost:4321",
+    language: "pt",
+    locale: "pt-BR",
+    diarize: true,
   });
+  const [health, setHealth] = useState<HealthResponse | null>(null);
+  const [healthErr, setHealthErr] = useState<string | null>(null);
+  const [log, setLog] = useState<NetEntry[]>([]);
+  const [lastResult, setLastResult] = useState<TranscriptionResult | null>(null);
 
-  async function testConnection() {
-    setTestingApi(true);
-    setApiStatus(null);
-    try {
-      const response = await fetch(`${apiBase.replace(/\/$/, "")}/health`, {
-        signal: AbortSignal.timeout(8000),
-      });
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      const health = await response.json();
-      setApiStatus({
-        ok: true,
-        detail: `ok · ASR ${health.asr_provider} · diarização ${health.diarization_provider} · streams ${health.active_streams}/${health.max_streams} · ${health.device}`,
-      });
-    } catch (error) {
-      setApiStatus({
-        ok: false,
-        detail: error instanceof Error ? error.message : "falha desconhecida",
-      });
-    } finally {
-      setTestingApi(false);
-    }
-  }
+  const addLog = useCallback((label: string, data?: unknown) => {
+    setLog((o) => [...o.slice(-99), { time: now(), label, data }]);
+  }, []);
 
-  async function toggleRecording() {
-    if (recording) {
-      micRef.current?.stop();
-      micRef.current = null;
-      setRecording(false);
-      stream.finish(); // flush: emite frases pendentes e fecha o stream
-      return;
-    }
-    try {
-      await stream.connect(options("mic"));
-      micRef.current = await startMicCapture((pcm) => stream.sendAudio(pcm));
-      setRecording(true);
-    } catch (error) {
-      micRef.current?.stop();
-      micRef.current = null;
-    }
-  }
-
-  async function transcribeFile(file: File) {
-    setSending(true);
-    setFileName(file.name);
-    try {
-      // Todo o processamento é local: decodifica mp3 -> PCM16 mono 16 kHz
-      // e envia pelo mesmo WebSocket de streaming.
-      const { channels, sampleRate } = await decodeAudioFile(file);
-      const pcm = toPCM16Mono16k(channels, sampleRate);
-      await stream.connect(options("arquivo"));
-      for (const chunk of splitIntoChunks(pcm, CHUNK_BYTES)) {
-        stream.sendAudio(chunk);
-        await new Promise((resolve) => setTimeout(resolve, 5)); // evita rajada no socket
+  useEffect(() => {
+    let alive = true;
+    const poll = async () => {
+      try {
+        const h = await getHealth(settings.baseUrl);
+        if (alive) {
+          setHealth(h);
+          setHealthErr(null);
+        }
+      } catch (e) {
+        if (alive) {
+          setHealth(null);
+          setHealthErr(`sem conexão com ${settings.baseUrl} (${String(e)})`);
+        }
       }
-      stream.finish();
-    } catch (error) {
-      console.error(error);
-    } finally {
-      setSending(false);
-    }
-  }
+    };
+    poll();
+    const t = setInterval(poll, 5000);
+    return () => {
+      alive = false;
+      clearInterval(t);
+    };
+  }, [settings.baseUrl]);
 
-  const busy = stream.connection === "connecting" || stream.connection === "closing";
-  const mixedContent =
-    typeof window !== "undefined" &&
-    window.location.protocol === "https:" &&
-    apiBase.startsWith("http://");
+  const set = (k: keyof Settings) => (v: string | boolean) =>
+    setSettings((o) => ({ ...o, [k]: v }));
 
   return (
-    <main className="mx-auto flex min-h-screen max-w-2xl flex-col gap-6 p-6">
-      <header className="flex items-center justify-between">
-        <div>
-          <h1 className="text-xl font-bold">Transcrição em tempo real</h1>
-          <p className="text-sm text-zinc-500">Nemotron 3.5 ASR + diarização pyannote</p>
-        </div>
-        <StatusBar connection={recording || sending ? "open" : stream.connection} />
-      </header>
+    <main>
+      <h1>STT API — teste (com diarização)</h1>
 
-      <section className="grid grid-cols-1 gap-3 rounded-xl bg-zinc-900/50 p-4 sm:grid-cols-2">
-        <Field label="URL da API">
-          <div className="flex gap-2">
-            <input
-              className={`${inputClass} min-w-0 flex-1`}
-              value={apiBase}
-              onChange={(e) => {
-                setApiBase(e.target.value);
-                setApiStatus(null);
-              }}
-              placeholder="http://localhost:8000"
-            />
-            <button
-              onClick={testConnection}
-              disabled={testingApi}
-              className="shrink-0 rounded-lg bg-zinc-700 px-3 py-2 text-sm font-medium hover:bg-zinc-600 disabled:opacity-50"
-            >
-              {testingApi ? "Testando…" : "Testar"}
-            </button>
-          </div>
-          {apiStatus && (
-            <p className={`text-xs ${apiStatus.ok ? "text-emerald-400" : "text-red-400"}`}>
-              {apiStatus.ok ? "● " : "○ "}
-              {apiStatus.detail}
-            </p>
-          )}
-        </Field>
-        <label className="flex items-end gap-2 pb-2 text-sm text-zinc-300">
+      <div className="settings">
+        <label>Servidor
+          <input
+            type="text"
+            value={settings.baseUrl}
+            onChange={(e) => set("baseUrl")(e.target.value.replace(/\/$/, ""))}
+          />
+        </label>
+        <label>Idioma
+          <select value={settings.language} onChange={(e) => set("language")(e.target.value)}>
+            <option value="pt">pt</option>
+            <option value="en">en</option>
+            <option value="es">es</option>
+          </select>
+        </label>
+        <label>Locale (WS)
+          <select value={settings.locale} onChange={(e) => set("locale")(e.target.value)}>
+            <option value="pt-BR">pt-BR</option>
+            <option value="en-US">en-US</option>
+            <option value="es-ES">es-ES</option>
+          </select>
+        </label>
+        <label>
           <input
             type="checkbox"
-            checked={partials}
-            onChange={(e) => setPartials(e.target.checked)}
-            className="h-4 w-4 accent-sky-500"
+            checked={settings.diarize}
+            onChange={(e) => set("diarize")(e.target.checked)}
           />
-          Mostrar texto parcial
+          Diarizar
         </label>
-      </section>
+      </div>
 
-      {mixedContent && (
-        <p className="rounded-lg bg-amber-950 px-3 py-2 text-sm text-amber-200">
-          Página em HTTPS com API em http:// será bloqueada pelo navegador (mixed content).
-          Use <span className="font-mono">https://&lt;host&gt;/api</span> no campo URL da API.
-        </p>
-      )}
+      <HealthBar health={health} error={healthErr} />
 
-      <nav className="flex gap-2">
-        {(["live", "file"] as const).map((t) => (
-          <button
-            key={t}
-            onClick={() => {
-              stream.reset();
-              setTab(t);
-            }}
-            className={`rounded-lg px-4 py-2 text-sm font-medium ${
-              tab === t ? "bg-sky-600 text-white" : "bg-zinc-800 text-zinc-300 hover:bg-zinc-700"
-            }`}
-          >
-            {t === "live" ? "Ao vivo (microfone)" : "Arquivo .mp3"}
+      <div className="tabs">
+        {(["batch", "sse", "ws", "refine"] as Tab[]).map((t) => (
+          <button key={t} className={tab === t ? "active" : ""} onClick={() => setTab(t)}>
+            {t === "batch" ? "Batch" : t === "sse" ? "Streaming SSE" : t === "ws" ? "WebSocket" : "Refine"}
           </button>
         ))}
-      </nav>
+      </div>
 
-      {tab === "live" ? (
-        <section className="flex flex-col gap-3">
-          <button
-            onClick={toggleRecording}
-            disabled={busy}
-            className={`rounded-xl px-4 py-3 font-semibold disabled:opacity-50 ${
-              recording ? "bg-red-600 hover:bg-red-500" : "bg-emerald-600 hover:bg-emerald-500"
-            }`}
-          >
-            {recording ? "Parar e finalizar" : "Começar a transcrever"}
-          </button>
-          <p className="text-xs text-zinc-500">
-            O microfone exige localhost ou HTTPS. Fale e acompanhe o parcial abaixo; as frases
-            saem com o falante (SPEAKER_00, …).
-          </p>
-        </section>
-      ) : (
-        <section className="flex flex-col gap-3">
-          <label
-            className={`cursor-pointer rounded-xl border-2 border-dashed px-4 py-6 text-center text-sm ${
-              sending ? "border-zinc-700 text-zinc-500" : "border-zinc-600 text-zinc-300 hover:border-sky-500"
-            }`}
-          >
-            {fileName ?? "Clique para escolher um .mp3"}
-            <input
-              type="file"
-              accept=".mp3,audio/mpeg"
-              className="hidden"
-              disabled={sending || busy}
-              onChange={(e) => {
-                const file = e.target.files?.[0];
-                if (file) void transcribeFile(file);
-                e.target.value = "";
-              }}
-            />
-          </label>
-          {sending && <p className="text-sm text-zinc-400">Enviando áudio… ({TARGET_SAMPLE_RATE / 1000} kHz mono)</p>}
-        </section>
-      )}
+      {tab === "batch" && <BatchTab settings={settings} addLog={addLog} onResult={setLastResult} />}
+      {tab === "sse" && <SseTab settings={settings} addLog={addLog} onResult={setLastResult} />}
+      {tab === "ws" && <WsTab settings={settings} addLog={addLog} onResult={setLastResult} />}
+      {tab === "refine" && <RefineTab settings={settings} lastResult={lastResult} addLog={addLog} />}
 
-      {stream.error && (
-        <p className="rounded-lg bg-red-950 px-3 py-2 text-sm text-red-200">Erro: {stream.error}</p>
-      )}
-
-      {partials && stream.partial && (
-        <p className="rounded-lg bg-zinc-900 px-3 py-2 text-sm text-zinc-400">
-          <span className="mr-2 text-xs uppercase text-zinc-600">parcial</span>
-          {stream.partial}
-          <span className="animate-pulse">▍</span>
-        </p>
-      )}
-
-      <section>
-        <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-zinc-500">
-          Frases ({stream.utterances.length})
-        </h2>
-        <UtteranceList utterances={stream.utterances} />
-      </section>
+      <NetLog entries={log} onClear={() => setLog([])} />
     </main>
   );
 }

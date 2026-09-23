@@ -1,56 +1,20 @@
 [project]
-name = "transcript-service"
+name = "stt-api"
 version = "0.1.0"
-description = "Realtime speech transcription with speaker diarization (Nemotron ASR + pyannote) — 4 parallel streams"
-readme = "README.md"
-requires-python = ">=3.12,<3.13"
+description = "API remota de transcrição (Whisper + refinamento via LLM)"
+requires-python = ">=3.11,<3.13"
 dependencies = [
-    "fastapi>=0.115",
-    "uvicorn[standard]>=0.30",
-    "pydantic>=2.9",
-    "pydantic-settings>=2.6",
-    "numpy>=1.26",
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.30.0",
+    "faster-whisper>=1.0.3",
+    "openai>=1.0.0",
     "python-multipart>=0.0.9",
+    "sse-starlette>=0.2.4",
+    "pydantic>=2.0.0",
+    "pydantic-settings>=2.0.0",
+    "torch>=2.2",
+    "torchaudio>=2.2",
+    "huggingface-hub>=0.24.0",  # HF_TOKEN para download autenticado
+    "requests>=2.28.0",
+    "pyannote.audio>=3.1.0",  # diarização opcional
 ]
-
-[project.optional-dependencies]
-# Heavy, GPU-bound dependencies. Install with:
-#   uv sync --extra asr --extra diarization
-# The Docker image installs everything; local dev/tests run without them.
-# (transformers>=5.13 carries the Nemotron3_5Asr streaming implementation
-# used by the ASR adapter; librosa is required by its feature extractor.)
-asr = ["transformers>=5.13", "torch>=2.2", "accelerate>=0.30", "librosa>=0.10"]
-diarization = ["pyannote.audio>=4.0"]
-
-[project.scripts]
-transcript-server = "transcript.main:run"
-
-[build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
-
-[dependency-groups]
-dev = [
-    "pytest>=8.3",
-    "pytest-asyncio>=0.24",
-    "httpx>=0.27",
-    "ruff>=0.8",
-]
-
-[tool.hatch.build.targets.wheel]
-packages = ["src/transcript"]
-
-[tool.pytest.ini_options]
-asyncio_mode = "auto"
-testpaths = ["tests"]
-markers = [
-    "gpu: requires CUDA plus the asr/diarization extras (transformers, pyannote)",
-]
-
-[tool.ruff]
-line-length = 100
-target-version = "py312"
-src = ["src", "tests"]
-
-[tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "SIM"]

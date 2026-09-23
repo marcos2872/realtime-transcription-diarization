@@ -1,68 +1,50 @@
-# Usage:
-#   1. cp .env.example .env  (then set TRANSCRIPT_HF_TOKEN)
-#   2. docker compose up --build
-#   3. open http://localhost:3000 (test frontend) — API at http://localhost:8000
-#
-# The browser talks to the API directly, so WEB_API_URL must be reachable
-# from the browser (default assumes both run on the same host).
 services:
-  transcript:
+  stt-api:
     build: .
-    image: transcript-service:latest
-    ports:
-      - "${TRANSCRIPT_PORT:-8000}:8000"
-    env_file:
-      - .env
+    ports: ["4321:8000"]
     environment:
-      TRANSCRIPT_HOST: 0.0.0.0
-      TRANSCRIPT_PORT: 8000
+      - CUDA_VISIBLE_DEVICES=0,1
+      - HF_TOKEN=${HF_TOKEN:-}
     volumes:
-      # Model weights (~3 GB) survive rebuilds/restarts here.
-      - hf-cache:/cache/huggingface
+      - ./models:/app/models
     deploy:
       resources:
         reservations:
           devices:
             - driver: nvidia
-              count: all
+              count: 2
               capabilities: [gpu]
-    shm_size: 2gb
-    restart: unless-stopped
 
-  web:
-    build:
-      context: ./web
-      args:
-        NEXT_PUBLIC_API_BASE_URL: ${WEB_API_URL:-http://localhost:8000}
-    image: transcript-web:latest
-    ports:
-      - "${WEB_PORT:-3000}:3000"
-    depends_on:
-      transcript:
-        condition: service_healthy
-    restart: unless-stopped
-
-  # HTTPS local (microfone fora de localhost exige contexto seguro).
-  # O front continua acessível em http://<host>:3000, mas use
-  # https://<host>/ e, no campo "URL da API", https://<host>/api
-  # (wss:// é derivado automaticamente). Aceite o aviso do navegador
-  # uma vez — o certificado é assinado pela CA interna do Caddy.
-  proxy:
-    build: ./proxy
-    image: transcript-proxy:latest
-    ports:
-      # Host usa porta alta (rootless docker não binda <1024); dentro do
-      # container o Caddy continua no 443.
-      - "${HTTPS_PORT:-8443}:443"
+  llama-refine:
+    image: ghcr.io/ggml-org/llama.cpp:server-cuda
+    ports: ["1234:8080"]
+    entrypoint: /entrypoint-refine.sh
+    command:
+      - --port
+      - "8080"
+      - --host
+      - "0.0.0.0"
+      - --n-gpu-layers
+      - "-1"
+      - --main-gpu
+      - "0"
+      - --parallel
+      - "8"
+      - --cont-batching
+      - --flash-attn
+      - "on"
+      - --ctx-size
+      - "32768"
     volumes:
-      - caddy-data:/data
-    depends_on:
-      transcript:
-        condition: service_healthy
-      web:
-        condition: service_started
-    restart: unless-stopped
-
-volumes:
-  hf-cache:
-  caddy-data:
+      - ./models:/models
+      - ./entrypoint-refine.sh:/entrypoint-refine.sh:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    environment:
+      - CUDA_VISIBLE_DEVICES=0
+      - HF_TOKEN=${HF_TOKEN:-}

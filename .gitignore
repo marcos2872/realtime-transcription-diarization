@@ -3,29 +3,30 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 .venv/
-.pytest_cache/
-.ruff_cache/
-dist/
-build/
+venv/
+.uv/
 
-# Environment / secrets
+# Env / secrets — nunca commitar
 .env
 .env.local
 
-# Models cache (se baixados para dentro do repo)
-.cache/
+# Modelos locais (11GB: Whisper + GGUF) — baixados sob demanda
 models/
-*.nemo
 *.gguf
+*.bin
+*.pt
+*.safetensors
 
-# Editors / OS
+# OS / editor
+.DS_Store
 .idea/
 .vscode/
-.DS_Store
+*.swp
+/
 
-# Node / Next.js (web/)
-node_modules/
+# Next.js (front de teste em web/)
+web/node_modules/
 web/.next/
 web/out/
 *.tsbuildinfo
-next-env.d.ts
+web/next-env.d.ts
