@@ -70,16 +70,19 @@ def diarize(
     Returns:
         Lista de dicts: {speaker, tStart, tEnd}
     """
-    import torch
-    from pyannote.core import Annotation
-
     pipeline = _load_pipeline()
 
     logger.info("Diarizando %s ...", audio_path)
-    output: Annotation = pipeline(audio_path)  # type: ignore
+    output = pipeline(audio_path)  # type: ignore
+
+    # pyannote v4 devolve DiarizeOutput (com .speaker_diarization), não
+    # mais um Annotation direto como na v3. Mantém compat com ambos.
+    annotation = output
+    if not hasattr(annotation, "itertracks"):
+        annotation = output.speaker_diarization
 
     segments: list[dict[str, Any]] = []
-    for turn, _, speaker in output.itertracks(yield_label=True):
+    for turn, _, speaker in annotation.itertracks(yield_label=True):
         segments.append({
             "speaker": str(speaker),
             "tStart": round(float(turn.start), 2),
