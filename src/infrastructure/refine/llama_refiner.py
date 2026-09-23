@@ -92,6 +92,9 @@ class Refiner:
                 ],
                 temperature=0.1,
                 max_tokens=4096,
+                # Qwen3 tem thinking mode — desligado: refine é correção
+                # direta, raciocínio só adicionaria latência.
+                extra_body={"enable_thinking": False},
             )
             elapsed = time.time() - t0
 

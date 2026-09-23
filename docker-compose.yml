@@ -1,9 +1,13 @@
 services:
+  # Layout de GPUs (2x RTX 4000 Ada 20GB):
+  #   GPU 0 → só llama-refine (dedicada; permite modelo maior no refine)
+  #   GPU 1 → só stt-api (Whisper + pyannote, sem briga por VRAM)
   stt-api:
     build: .
     ports: ["4321:8000"]
     environment:
-      - CUDA_VISIBLE_DEVICES=0,1
+      - CUDA_VISIBLE_DEVICES=1
+      - WHISPER_GPUS=cuda:0  # dentro do container só existe cuda:0 (= física 1)
       - HF_TOKEN=${HF_TOKEN:-}
     volumes:
       - ./models:/app/models

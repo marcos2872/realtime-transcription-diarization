@@ -15,7 +15,7 @@ class Settings(BaseSettings):
     # ── Refinamento (OpenAI-compatible) ──
     refine_base_url: str = "http://localhost:8080/v1"
     refine_api_key: str = ""
-    refine_model: str = "Qwen2.5-7B-Instruct"
+    refine_model: str = "Qwen3-8B"
 
     # ── Concorrência ──
     max_concurrent_streams: int = 20
