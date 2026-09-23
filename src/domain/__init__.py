@@ -10,8 +10,11 @@ from src.domain.services.speaker_rules import (
     MIC_SPEAKER,
     SYSTEM_SPEAKER,
     apply_stop_rules,
+    match_raw_label,
     normalize_speaker,
+    overlap,
     person_label,
+    resolve_stable_labels,
 )
 from src.domain.value_objects.audio_format import (
     BITS_PER_SAMPLE,
@@ -31,8 +34,11 @@ __all__ = [
     "MIC_SPEAKER",
     "SYSTEM_SPEAKER",
     "apply_stop_rules",
+    "match_raw_label",
     "normalize_speaker",
+    "overlap",
     "person_label",
+    "resolve_stable_labels",
     "BITS_PER_SAMPLE",
     "BYTES_PER_SECOND",
     "CHANNELS",

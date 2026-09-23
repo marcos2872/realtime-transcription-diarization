@@ -20,6 +20,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Sobreposição mínima (s) para considerar que um label cru do run atual
+# é a mesma voz de um Pessoa já rotulado. Abaixo disso, vira Pessoa novo.
+
 # ── Helpers para WAV parcial ──
 # Canônicos em src.infrastructure.audio.wav; mantidos aqui como alias
 # para compatibilidade com imports existentes.
@@ -44,6 +47,8 @@ class Session:
         self._last_transcribed_pos: dict[str, int] = {}  # bytes já transcritos
         self._last_diarized_pos: dict[str, int] = {}  # bytes já diarizados
         self._cached_diarization: dict[str, list[dict]] = {}  # diarização em cache
+        self._labeled_timeline: list[dict] = []  # segmentos rotulados (timeline acumulada)
+        self._next_person_idx = 1  # próximo índice para "Pessoa N" estável
         self._seq: dict[str, int] = {}
         self._closed = False
         self._lock = asyncio.Lock()
@@ -164,10 +169,7 @@ class Session:
             segments: segmentos do Whisper (timestamps relativos ao chunk)
             pcm_offset: posição em bytes deste chunk no áudio acumulado
         """
-        from src.infrastructure.diarization.pyannote import (
-            assign_speakers,
-            diarize as run_diarize,
-        )
+        from src.infrastructure.diarization.pyannote import diarize as run_diarize
 
         # Concatena o PCM acumulado completo
         full_pcm = b"".join(self._pcm_buffers.get("system", []))
@@ -191,10 +193,26 @@ class Session:
             seg["tStart"] = round(seg.get("tStart", 0) + offset_sec, 2)
             seg["tEnd"] = round(seg.get("tEnd", 0) + offset_sec, 2)
 
-        # Atribui locutores via assign_speakers
-        assigned = assign_speakers(segments, diarization)
-        # Substitui os segmentos originais pelos com speaker preenchido
-        segments[:] = assigned
+        # Atribui locutores estáveis entre flushes: cada label cru do run
+        # atual herda o Pessoa com maior sobreposição no histórico, o que
+        # resolve a permutação de clusters entre execuções do pyannote.
+        # (O stop final re-diariza o áudio completo de uma vez — autoritativo.)
+        from src.domain.services.speaker_rules import (
+            match_raw_label,
+            resolve_stable_labels,
+        )
+
+        label_map, self._next_person_idx = resolve_stable_labels(
+            diarization, self._labeled_timeline, self._next_person_idx
+        )
+        for seg in segments:
+            raw = match_raw_label(seg.get("tStart", 0), seg.get("tEnd", 0), diarization)
+            if raw is not None and raw in label_map:
+                seg["speaker"] = label_map[raw]
+        self._labeled_timeline.extend(
+            {"speaker": s["speaker"], "tStart": s["tStart"], "tEnd": s["tEnd"]}
+            for s in segments
+        )
 
         # Cache (para uso futuro / finalização)
         self._cached_diarization["system"] = diarization
